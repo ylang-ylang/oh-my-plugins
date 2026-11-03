@@ -12,7 +12,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
-import { readConfig, rootDir } from "./config.mjs";
+import { listenerConfig, readConfig, rootDir } from "./config.mjs";
 
 const PROTOCOL_VERSION = 1;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -470,7 +470,7 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
     throw new TypeError("onError must be a function when provided");
   }
 
-  const config = await readConfig();
+  const config = listenerConfig(await readConfig());
   let tls;
   if (config.tlsCert !== undefined) {
     const [cert, key] = await Promise.all([

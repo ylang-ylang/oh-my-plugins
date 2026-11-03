@@ -9,7 +9,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { TextDecoder } from "node:util";
 
-import { assertExistingPrivateRoot, readConfig, readPrivateFile, rootDir, writeConfig } from "./config.mjs";
+import { assertExistingPrivateRoot, isLoopbackHost, readConfig, readPrivateFile, rootDir, writeConfig } from "./config.mjs";
 
 const PROTOCOL_VERSION = 1;
 const MAX_REQUEST_JSON_BYTES = 64 * 1024;
@@ -28,13 +28,52 @@ const KNOWN_STATES = new Set(["queued", "running", ...TERMINAL_STATES]);
 
 const HELP = `omp-lan-rpc: authenticated HTTP/JSON v1 access to one ordinary OMP session
 
+INSTALLATION PREREQUISITES (ON THE MACHINE RUNNING OMP)
+  OMP must already work. Git is required; the standalone client needs Node >=22.
+  OMP 18.2.6 invokes external bun during plugin installation. A missing-bun
+  error occurs BEFORE this plugin is downloaded, so install Bun first.
+  Recent OMP releases use their embedded Bun; Homebrew itself is optional.
+
+  Already have Homebrew? Install Bun:
+    brew install oven-sh/bun/bun
+  If Git or a suitable Node is missing:
+    brew install git node
+
+  No Homebrew? Run its official installer as your normal user, not with sudo:
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  Follow the installer's Next steps. Common PATH setup (choose ONE platform):
+    Linux:             eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    macOS Apple Silicon: eval "$(/opt/homebrew/bin/brew shellenv)"
+    macOS Intel:       eval "$(/usr/local/bin/brew shellenv)"
+  Add the matching eval line literally once to your shell startup file:
+  ~/.bashrc or ~/.zshrc; macOS login Zsh uses ~/.zprofile per the installer.
+  Open a new terminal, check brew --version, then install Bun as above.
+  Ubuntu/Debian prerequisites, if missing:
+    sudo apt-get update
+    sudo apt-get install -y build-essential procps curl file git ca-certificates unzip
+  Full platform requirements: https://docs.brew.sh/Installation
+
+  Alternative: install Bun directly WITHOUT Homebrew (Linux needs unzip):
+    curl -fsSL https://bun.com/install | bash
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+  Persist those exports once in ~/.bashrc or ~/.zshrc if the installer did not.
+  Official Bun instructions: https://bun.com/docs/installation
+
+  Before retrying, check the SAME shell that will launch OMP:
+    command -v bun
+    bun --version
+    git --version
+    node --version
+  Old tmux panes and running OMP processes need restarting to inherit new PATH.
+
 INSTALL AND START
-  Install directly from GitHub, then restart OMP:
-
+  Once prerequisites are ready, install from GitHub and restart OMP:
     omp plugin install github:ylang-ylang/omp-lan-rpc
+  Fully exit and relaunch OMP after installation/upgrades. The radar layout is
+  prepared before native TUI construction; plugin hot reload or /lan restart
+  alone cannot rebuild an already-created status bar.
 
-  OMP 18.2.6 requires bun on PATH for installation; recent OMP releases use
-  their embedded Bun. Git is required. No npm publication is needed.
   Default user-install client location (custom/XDG data roots may differ):
 
     node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs help
@@ -58,6 +97,7 @@ USAGE
   node /abs/repo/cli.mjs help
   node /abs/repo/cli.mjs list
   node /abs/repo/cli.mjs config [--host HOST] [--port PORT]
+                                  [--lan on|off]
                                   [--tls-cert PATH] [--tls-key PATH]
   node /abs/repo/cli.mjs session [CONNECTION]
   node /abs/repo/cli.mjs send [CONNECTION] --message-file PATH
@@ -93,8 +133,14 @@ COMMANDS
     health check. Stale/invalid files are reported but never removed.
 
   config
-    With no flags, print host, port, and TLS path settings (never key contents).
-    Setter flags update only the named settings using the shared config file.
+    With no flags, print the saved host, port, LAN toggle, and TLS paths (never
+    key contents). Setter flags update only the named saved settings. An explicit
+    --host also sets the LAN toggle from whether that host is non-loopback unless
+    --lan is given. Changes apply only to the next server startup; they do not
+    alter the listener in a currently running OMP session. --lan off retains the
+    saved host and TLS paths. With a saved non-loopback host, the next startup
+    keeps the local API available over plain HTTP on 127.0.0.1. A saved loopback
+    host retains its existing HTTP or HTTPS setup.
 
   session
     Print current protocol/session metadata as JSON.
@@ -113,12 +159,20 @@ COMMANDS
     exit nonzero.
 
 OMP LIFECYCLE AND LIMITS
-  In OMP, use /lan-rpc status, /lan-rpc start, /lan-rpc stop, or /lan-rpc
-  restart. Restart rotates the instance and token. A session/branch/tree switch
-  is refused while remote work is queued or running. /lan-rpc stop interrupts
-  protocol records, but it cannot abort or roll back agent/tool side effects
-  already started. If another extension cancels a transition after this plugin
-  closed its provisional listener, restore service explicitly with /lan-rpc start.
+  In OMP, /lan opens the LAN RPC control menu. /lan on enables LAN access
+  (first use asks for an IP, port, certificate and key); /lan off disables LAN
+  but keeps loopback access and remembers the LAN settings. /lan configure
+  edits the settings and enables LAN. These actions save future-session defaults
+  and restart only the current listener; other running sessions are unchanged.
+  The native status line shows a small radar indicator, not the endpoint URL.
+  Its md-radar glyph (U+F0437) requires a supporting Nerd Font in your terminal;
+  color follows OMP's native theme. Use the menu/info to distinguish local/LAN.
+  Use /lan info for connection details; /lan start, stop, restart control the
+  current listener. Restart rotates the instance and token. Session/branch/tree
+  switches and listener reconfiguration are refused while remote work is pending.
+  /lan stop interrupts protocol records, not already-started agent/tool effects.
+  If another extension cancels a transition after the listener closed, restore
+  service with /lan start. The former /lan-rpc command is no longer registered.
 
   One generation has 64 queued/running slots and 256 total idempotency records;
   accepted IDs are never silently evicted. Message text is limited to 48 KiB and
@@ -258,6 +312,12 @@ function parsePort(value) {
   const port = parseNonnegativeInteger(value, "--port");
   if (port > 65_535) throw new CliError("--port must be between 0 and 65535");
   return port;
+}
+
+function parseLanMode(value) {
+  if (value === "on") return true;
+  if (value === "off") return false;
+  throw new CliError("--lan must be on or off");
 }
 
 function parseWaitSeconds(value) {
@@ -649,6 +709,7 @@ async function commandConfig(args) {
   const options = parseOptions(args, {
     "--host": "value",
     "--port": "value",
+    "--lan": "value",
     "--tls-cert": "value",
     "--tls-key": "value",
   });
@@ -660,8 +721,9 @@ async function commandConfig(args) {
   const current = await readConfig();
   const next = { ...current };
   let changed = false;
-  if (options["--host"] !== undefined) {
-    next.host = options["--host"];
+  const host = options["--host"];
+  if (host !== undefined) {
+    next.host = host;
     changed = true;
   }
   if (options["--port"] !== undefined) {
@@ -676,13 +738,22 @@ async function commandConfig(args) {
     next.tlsKey = resolve(options["--tls-key"]);
     changed = true;
   }
+
+  const lan = options["--lan"];
+  if (lan !== undefined) {
+    next.lanEnabled = parseLanMode(lan);
+    changed = true;
+  } else if (host !== undefined) {
+    next.lanEnabled = !isLoopbackHost(host);
+  }
+
   const config = changed ? await writeConfig(next) : current;
-  const displayed = config ?? next;
   printJson({
-    host: displayed.host,
-    port: displayed.port,
-    tlsCert: displayed.tlsCert ?? null,
-    tlsKey: displayed.tlsKey ?? null,
+    host: config.host,
+    port: config.port,
+    lanEnabled: config.lanEnabled,
+    tlsCert: config.tlsCert ?? null,
+    tlsKey: config.tlsKey ?? null,
   });
   return 0;
 }

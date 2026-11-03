@@ -1,6 +1,6 @@
 {
   "name": "omp-lan-rpc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Authenticated local and LAN message access to a running OMP session",
@@ -10,6 +10,6 @@
   "engines": { "node": ">=22" },
   "bin": { "omp-lan-rpc": "./cli.mjs" },
   "omp": { "extensions": ["./extension.mjs"] },
-  "files": ["extension.mjs", "controller.mjs", "server.mjs", "config.mjs", "cli.mjs"],
-  "scripts": { "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs" }
+  "files": ["extension.mjs", "status.mjs", "controller.mjs", "server.mjs", "config.mjs", "cli.mjs"],
+  "scripts": { "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs config.test.mjs status.test.mjs" }
 }

@@ -14,8 +14,8 @@ import { randomBytes } from "node:crypto";
 
 const CONFIG_FILENAME = "config.json";
 const MAX_CONFIG_BYTES = 64 * 1024;
-const DEFAULT_CONFIG = Object.freeze({ host: "127.0.0.1", port: 0 });
-const CONFIG_KEYS = new Set(["host", "port", "tlsCert", "tlsKey"]);
+const DEFAULT_CONFIG = Object.freeze({ host: "127.0.0.1", port: 0, lanEnabled: false });
+const CONFIG_KEYS = new Set(["host", "port", "tlsCert", "tlsKey", "lanEnabled"]);
 const LOOPBACKS = new BlockList();
 LOOPBACKS.addSubnet("127.0.0.0", 8, "ipv4");
 LOOPBACKS.addAddress("::1", "ipv6");
@@ -104,7 +104,7 @@ export async function readPrivateFile(path, maxBytes) {
   }
 }
 
-function isLoopback(host) {
+export function isLoopbackHost(host) {
   const family = isIP(host);
   return family !== 0 && LOOPBACKS.check(host, family === 4 ? "ipv4" : "ipv6");
 }
@@ -128,6 +128,12 @@ function validateConfig(value) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new TypeError("config.port must be an integer from 0 through 65535");
   }
+  const lanEnabled = value.lanEnabled === undefined
+    ? !isLoopbackHost(host)
+    : value.lanEnabled;
+  if (typeof lanEnabled !== "boolean") {
+    throw new TypeError("config.lanEnabled must be a boolean");
+  }
 
   const hasCert = value.tlsCert !== undefined;
   const hasKey = value.tlsKey !== undefined;
@@ -135,7 +141,7 @@ function validateConfig(value) {
     throw new TypeError("config.tlsCert and config.tlsKey must be provided together");
   }
 
-  const normalized = { host, port };
+  const normalized = { host, port, lanEnabled };
   if (hasCert) {
     if (typeof value.tlsCert !== "string" || value.tlsCert.length === 0) {
       throw new TypeError("config.tlsCert must be a non-empty path");
@@ -150,11 +156,17 @@ function validateConfig(value) {
     normalized.tlsKey = value.tlsKey;
   }
 
-  if (!isLoopback(host) && !hasCert) {
-    throw new TypeError("TLS certificate and key are required for a non-loopback host");
+  if (lanEnabled && !isLoopbackHost(host) && !hasCert) {
+    throw new TypeError("TLS certificate and key are required when LAN access is enabled");
   }
 
   return normalized;
+}
+
+export function listenerConfig(config) {
+  const normalized = validateConfig(config);
+  if (normalized.lanEnabled || isLoopbackHost(normalized.host)) return normalized;
+  return { host: DEFAULT_CONFIG.host, port: normalized.port, lanEnabled: false };
 }
 
 export async function readConfig() {

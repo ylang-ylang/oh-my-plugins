@@ -66,7 +66,7 @@ export class RequestController {
     // Never evict an idempotency record silently. A full generation must be
     // rotated explicitly so an old accepted ID cannot accidentally run twice.
     if (this.requests.size >= MAX_REQUESTS) {
-      throw failure(429, 'request_capacity', 'Session endpoint has 256 records; drain requests then restart /lan-rpc');
+      throw failure(429, 'request_capacity', 'Session endpoint has 256 records; drain requests then use /lan restart');
     }
     const timestamp = this.now();
     const record = { generation, requestId, message, state: 'queued', createdAt: timestamp, updatedAt: timestamp };
