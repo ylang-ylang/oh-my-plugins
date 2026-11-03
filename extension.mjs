@@ -1,15 +1,13 @@
-import { readFile } from 'node:fs/promises';
-import { X509Certificate } from 'node:crypto';
-import { homedir, networkInterfaces } from 'node:os';
+import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
-import { resolve } from 'node:path';
-import { createSecureContext } from 'node:tls';
 import { RequestController } from './controller.mjs';
 import { isLoopbackHost, readConfig, writeConfig } from './config.mjs';
 import { startServer } from './server.mjs';
 import { StatusIndicator } from './status.mjs';
+import { matchesKey } from '@oh-my-pi/pi-tui';
+import { prepareTls } from './tls.mjs';
 
-// Token holders can drive the existing agent and its tools. This is not a sandbox.
+// HTTPS token holders, or anyone reaching HTTP, can drive the agent and its tools.
 export default function lanRpc(pi) {
   const indicator = new StatusIndicator(pi);
   let controller;
@@ -84,8 +82,8 @@ export default function lanRpc(pi) {
     }
   }
 
-  // One ordered chain owns listener replacement. Authentication rotates on every
-  // restart; pending work must be completed or explicitly stopped first.
+  // One ordered chain owns listener replacement. HTTPS authentication rotates
+  // on restart; pending work must be completed or explicitly stopped first.
   function schedule(action) {
     serial = serial.then(action, action);
     return serial;
@@ -130,9 +128,6 @@ export default function lanRpc(pi) {
   });
   pi.on('agent_end', event => controller?.end(event));
 
-  function expandPath(value) {
-    return resolve(value.startsWith('~/') ? `${homedir()}/${value.slice(2)}` : value);
-  }
 
   async function configureLan(ctx, config, configure) {
     let next = { ...config, lanEnabled: true };
@@ -152,30 +147,12 @@ export default function lanRpc(pi) {
       if (!/^\d+$/.test(portText) || Number(portText) > 65535) throw new Error('Port must be an integer from 0 to 65535.');
       next = { ...next, host, port: Number(portText) };
     }
-    const protocol = await ctx.ui.select('LAN protocol', ['HTTPS (recommended)', 'HTTP (unencrypted)']);
+    const protocol = await ctx.ui.select('LAN protocol', ['HTTPS (recommended)', 'HTTP (unencrypted, NO authentication)']);
     if (!protocol) return;
-    next.protocol = protocol === 'HTTP (unencrypted)' ? 'http' : 'https';
-    if (next.protocol === 'https' && (configure || !next.tlsCert || !next.tlsKey)) {
-      const certInput = await ctx.ui.input('TLS certificate path (leave blank to keep the saved path)', config.tlsCert || '');
-      if (certInput === undefined) return;
-      const keyInput = await ctx.ui.input('TLS private key FILE path, not key contents (leave blank to keep the saved path)', config.tlsKey || '');
-      if (keyInput === undefined) return;
-      const cert = certInput.trim() || config.tlsCert;
-      const key = keyInput.trim() || config.tlsKey;
-      if (!cert || !key) throw new Error('A TLS certificate and private key file are required for HTTPS.');
-      next.tlsCert = expandPath(cert);
-      next.tlsKey = expandPath(key);
-    }
+    next.protocol = protocol === 'HTTP (unencrypted, NO authentication)' ? 'http' : 'https';
     return next;
   }
 
-  async function validateTls(config) {
-    const [cert, key] = await Promise.all([readFile(config.tlsCert), readFile(config.tlsKey)]);
-    createSecureContext({ cert, key });
-    if (!new X509Certificate(cert).checkIP(config.host)) {
-      throw new Error('The TLS certificate IP SAN does not match the bind IP. Use a certificate valid for that IP.');
-    }
-  }
 
   async function changeLan(ctx, enabled, configure = false) {
     requireNoWork();
@@ -184,14 +161,14 @@ export default function lanRpc(pi) {
     if (enabled) {
       next = await configureLan(ctx, next, configure);
       if (!next) return;
-      // HTTP deliberately ignores saved TLS files; HTTPS validates before mutation.
-      if (next.protocol === 'https') await validateTls(next);
       const encrypted = next.protocol === 'https';
       const warning = encrypted
-        ? 'Use HTTPS and a session token. Token holders can use this agent\'s tools.'
-        : 'Bearer tokens, messages, and responses will travel in plaintext. Anyone who can observe or alter this network traffic may steal the token and control this agent\'s tools.';
-      if (!(await ctx.ui.confirm(encrypted ? 'Enable LAN access?' : 'Enable unencrypted HTTP LAN access?',
+        ? 'HTTPS requires a session token and verified TLS. A self-signed certificate is generated automatically unless custom TLS paths are saved. Token holders can use this agent\'s tools.'
+        : 'HTTP is unencrypted with NO authentication. Anyone who can reach this port can control this agent and its tools. Messages and responses can be read or altered on the network.';
+      if (!(await ctx.ui.confirm(encrypted ? 'Enable LAN access?' : 'Enable HTTP with NO authentication?',
         `Listen on ${next.host}:${next.port || 'automatic port'}. ${warning} These settings also apply to future sessions.`))) return;
+      // Validate or generate TLS only after consent, before changing saved settings.
+      if (encrypted) await prepareTls(next);
     }
     // Prompts can remain open while requests arrive: re-check before freezing
     // admission and changing the configuration. No work is silently discarded.
@@ -220,11 +197,61 @@ export default function lanRpc(pi) {
     }
   }
 
-  function showInfo(ctx) {
-    const labels = { off: 'Stopped', local: 'Local only', lan: 'LAN enabled', error: 'Error / paused' };
-    ctx.ui.notify(server
-      ? `${labels[mode()]}\n${server.endpoint}\ninstance=${server.instanceId}\n${JSON.stringify(controller.session())}\nToken contents are hidden; use the private instance file to retrieve the token.`
-      : 'LAN RPC is stopped. Use /lanrpc start to start access, or /lanrpc on to enable LAN access.', 'info');
+  async function showInfo(ctx) {
+    if (!server) {
+      ctx.ui.notify('LAN RPC is stopped. Use /lanrpc start to start access, or /lanrpc on to enable LAN access.', 'info');
+      return;
+    }
+    if (!ctx.hasUI) throw new Error('Connection details require an interactive OMP terminal.');
+    const current = server;
+    const encrypted = new URL(current.endpoint).protocol === 'https:';
+    const session = controller.session();
+    await ctx.ui.custom((tui, _theme, _keys, done) => {
+      let active = true;
+      let copied = false;
+      let text;
+      const content = () => [
+        'LAN RPC — Connection details', '', current.endpoint,
+        `Instance: ${current.instanceId}`, `Session: ${JSON.stringify(session.sessionId)}`,
+        `Generation: ${session.generation} | Busy: ${session.busy} | Queue: ${session.queueDepth}`,
+        `Working directory: ${JSON.stringify(session.cwd)}`, '',
+        ...(encrypted ? [
+          'HTTPS — encrypted; Bearer token authentication required',
+          `Certificate: ${current.certFile}`,
+          'Trust this certificate via --ca (transfer it securely), or use your trust store.',
+          `Token file: ${current.tokenFile}`, '', 'Token:', current.token, '',
+          'c — Copy token',
+          ...(copied ? ['Token sent to terminal clipboard (OSC 52). Terminal permission/support is required.'] : []),
+        ] : [
+          'HTTP — unencrypted; NO authentication',
+          'Anyone who can reach this port can control this agent and its tools.',
+          'Authentication: none. No token or credential file.',
+          'Non-loopback clients must explicitly pass --allow-http.',
+        ]), '', 'Esc / Enter — Close',
+      ].join('\n');
+      return {
+        render(width) {
+          text ??= new pi.pi.Text(content(), 1, 1);
+          return text.render(width);
+        },
+        invalidate() { text = undefined; },
+        handleInput(data) {
+          if (!active) return;
+          if (matchesKey(data, 'escape') || matchesKey(data, 'enter')) {
+            active = false;
+            done();
+          } else if (encrypted && matchesKey(data, 'c')) {
+            // Use the public TUI terminal writer, not stdout or a remote host's
+            // desktop clipboard. OSC 52 reaches the SSH client's terminal.
+            tui.terminal.write(`\x1b]52;c;${Buffer.from(current.token).toString('base64')}\x07`);
+            copied = true;
+            text = undefined;
+            tui.requestRender();
+          }
+        },
+        dispose() { active = false; text = undefined; },
+      };
+    }, { overlay: true });
   }
 
   pi.registerCommand('lanrpc', {
@@ -247,7 +274,7 @@ export default function lanRpc(pi) {
         })[choice];
       }
       try {
-        if (command === 'info') showInfo(ctx);
+        if (command === 'info') await showInfo(ctx);
         else if (['on', 'off', 'configure'].includes(command)) {
           await schedule(() => changeLan(ctx, command !== 'off', command === 'configure'));
         } else if (command === 'stop') {

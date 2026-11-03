@@ -1,15 +1,15 @@
 {
   "name": "omp-lan-rpc",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Authenticated local and LAN message access to a running OMP session",
+  "description": "Local and LAN message access to an OMP session: anonymous HTTP or verified, authenticated HTTPS",
   "repository": { "type": "git", "url": "git+https://github.com/ylang-ylang/omp-lan-rpc.git" },
   "homepage": "https://github.com/ylang-ylang/omp-lan-rpc",
   "bugs": { "url": "https://github.com/ylang-ylang/omp-lan-rpc/issues" },
   "engines": { "node": ">=22" },
   "bin": { "omp-lan-rpc": "./cli.mjs" },
   "omp": { "extensions": ["./extension.mjs"] },
-  "files": ["extension.mjs", "status.mjs", "controller.mjs", "server.mjs", "config.mjs", "cli.mjs"],
-  "scripts": { "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs config.test.mjs status.test.mjs" }
+  "files": ["extension.mjs", "status.mjs", "controller.mjs", "server.mjs", "config.mjs", "tls.mjs", "cli.mjs"],
+  "scripts": { "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs config.test.mjs tls.test.mjs status.test.mjs" }
 }

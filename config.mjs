@@ -75,7 +75,7 @@ export async function assertExistingPrivateRoot(path) {
   return true;
 }
 
-async function ensurePrivateRoot(path) {
+export async function ensurePrivateRoot(path) {
   const created = await mkdir(path, { recursive: true, mode: 0o700 });
   if (created !== undefined) await chmod(path, 0o700);
   assertPrivateDirectoryStat(await lstat(path), path);
@@ -159,10 +159,6 @@ function validateConfig(value) {
     }
     normalized.tlsCert = value.tlsCert;
     normalized.tlsKey = value.tlsKey;
-  }
-
-  if (protocol === "https" && !hasCert && (lanEnabled || isLoopbackHost(host))) {
-    throw new TypeError("TLS certificate and key are required for HTTPS");
   }
 
   return normalized;

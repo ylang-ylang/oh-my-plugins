@@ -26,7 +26,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const TERMINAL_STATES = new Set(["completed", "failed", "interrupted"]);
 const KNOWN_STATES = new Set(["queued", "running", ...TERMINAL_STATES]);
 
-const HELP = `omp-lan-rpc: authenticated HTTP/JSON v1 access to one ordinary OMP session
+const HELP = `omp-lan-rpc: HTTP/JSON v1 access to one ordinary OMP session
 
 INSTALLATION PREREQUISITES (ON THE MACHINE RUNNING OMP)
   OMP must already work. Git is required; the standalone client needs Node >=22.
@@ -88,7 +88,7 @@ INSTALL AND START
 
   Runtime/config root: OMP_LAN_RPC_DIR, otherwise ~/.omp/lan-rpc.
   Persistent settings: <root>/config.json. Per-session discovery lives under
-  <root>/instances/<instance-id>.json; its private token is the matching .token
+  <root>/instances/<instance-id>.json. Only HTTPS has a matching private .token
   file. Directories must be owned by you with mode 0700, files mode 0600/0400.
   Do not put this directory in a shared mount or source repository.
   Node >=22 is required for the client; the host API was verified on OMP 18.2.6.
@@ -116,15 +116,16 @@ CONNECTION
 
   Explicit remote connection:
     --endpoint URL        Server origin, for example https://192.0.2.10:9443
-    --token-file PATH     Private file containing the bearer token.
+    --token-file PATH     Private bearer token file; required for HTTPS, forbidden for HTTP.
     --ca CERT             Optional CA bundle for TLS verification. This may also
                           be used with local discovery of an HTTPS instance.
     --allow-http          Explicitly allow non-loopback plaintext HTTP, including
                           a LAN endpoint selected through local discovery.
 
-  --endpoint and --token-file are required together and cannot be combined with
-  --instance. Loopback HTTP works by default. Non-loopback HTTP requires
-  --allow-http: bearer tokens, messages, and responses are exposed in plaintext.
+  --endpoint cannot be combined with --instance. HTTPS requires --token-file.
+  HTTP is unencrypted with NO authentication and never reads or sends a token.
+  Anyone reaching its port can control the agent. Non-loopback HTTP requires
+  --allow-http; loopback HTTP works without it. --ca is forbidden for HTTP.
   URLs cannot contain credentials, a path, query, or fragment. Redirects are never
   followed, even with --allow-http. HTTPS always verifies certificates and
   hostnames; --allow-http does not disable TLS verification or allow downgrade.
@@ -137,9 +138,11 @@ COMMANDS
 
   config
     With no flags, print the saved host, port, LAN toggle, protocol, and TLS paths
-    (never key contents). --protocol http explicitly opts into plaintext;
-    --protocol https requires certificate and key paths when enabled. Legacy TLS
-    configurations remain HTTPS. Moving from a loopback host to LAN defaults to
+    (never key contents). --protocol http opts into unencrypted, anonymous access.
+    HTTPS automatically generates/reuses a private self-signed IP certificate
+    at startup using OpenSSL. --tls-cert and --tls-key together select advanced
+    custom certificates instead; existing custom files are never overwritten.
+    Legacy TLS configurations remain HTTPS. Moving from loopback to LAN defaults to
     HTTPS unless --protocol http is explicitly given. --host also sets the LAN
     toggle unless --lan is given. Changes apply only to the next server startup,
     not the current listener. --lan off retains the saved host, protocol, and TLS
@@ -164,17 +167,22 @@ COMMANDS
 
 OMP LIFECYCLE AND LIMITS
   In OMP, /lanrpc opens the LAN RPC control menu. /lanrpc on enables LAN access
-  (first use asks for an IP and port); choose HTTPS (recommended, certificate and
-  key required) or HTTP (unencrypted, explicit risk confirmation). /lanrpc off
-  keeps loopback access and saved settings. /lanrpc configure edits and enables
+  (first use asks for an IP and port); choose HTTPS (recommended, automatic
+  self-signed certificate) or HTTP (unencrypted, NO authentication, explicit consent).
+  /lanrpc off keeps loopback access and saved settings. /lanrpc configure edits and enables
   LAN. These actions save future-session defaults and restart only the current
   listener; other running sessions are unchanged.
   The native status line shows a small radar indicator, not the endpoint URL.
   Its md-radar glyph (U+F0437) requires a supporting Nerd Font in your terminal;
   color follows OMP's native theme. Use the menu/info to distinguish local/LAN.
-  Use /lanrpc info for connection details; /lanrpc start, stop, restart control the
-  current listener. Restart rotates the instance and token. Session/branch/tree
-  switches and listener reconfiguration are refused while remote work is pending.
+  /lanrpc info and menu Connection details open a focused panel. HTTPS displays
+  the actual token, certificate path, and trust instructions. c copies the token
+  through terminal OSC 52 (including SSH); terminal support/permission is needed.
+  Esc or Enter closes the panel and removes its copy hotkey. HTTP has no token.
+  Tokens never appear in the status bar, logs, client output, or RPC metadata.
+  /lanrpc start, stop, restart control the current listener. Restart rotates the
+  instance and HTTPS token, but reuses a usable managed certificate for the same IP.
+  Session/branch/tree switches and listener reconfiguration are refused while remote work is pending.
   /lanrpc stop interrupts protocol records, not already-started agent/tool effects.
   If another extension cancels a transition after the listener closed, restore
   service with /lanrpc start. Earlier command names are no longer registered.
@@ -194,14 +202,19 @@ LOCAL EXAMPLES (NO CURL)
 EXPLICIT LAN TLS
   Configure the session endpoint before restarting OMP:
 
-    node /abs/repo/cli.mjs config --host 192.0.2.10 --port 9443 --protocol https \\
-      --tls-cert /abs/tls/server.crt --tls-key /abs/tls/server.key
+    node /abs/repo/cli.mjs config --host 192.0.2.10 --port 9443 --protocol https
 
-  HTTPS requires both certificate and key. The certificate SAN must match the
-  endpoint hostname or IP exactly (an IP endpoint needs an IP SAN).
-  Copy the instance token file to the client only through a secure channel, keep
-  it private (for example chmod 600), and connect without putting the token on
-  argv or stdout:
+  No manual certificate paths are needed. OpenSSL must be installed (Debian/Ubuntu:
+  apt install openssl; macOS: brew install openssl). Managed files live privately
+  under <root>/tls; their IP SAN matches the bind IP. They are reused across
+  restarts; changing the IP selects a matching certificate. /lanrpc info shows
+  its certificate and token file paths, and displays the token with c-to-copy.
+  Advanced custom TLS: add --tls-cert /abs/server.crt --tls-key /abs/server.key.
+  The certificate must be currently valid with an IP SAN matching the bind IP.
+  Securely transfer ONLY the public certificate (not the key) and token to the
+  client via SSH/SCP or another authenticated channel. Keep the token file private
+  (chmod 600). Explicitly trust the certificate using --ca or your trust store;
+  there is no insecure mode, implicit download trust, or automatic client trust.
 
     node /abs/repo/cli.mjs session --endpoint https://192.0.2.10:9443 \\
       --token-file /secure/omp.token --ca /secure/omp-ca.crt
@@ -212,27 +225,29 @@ EXPLICIT LAN TLS
       --token-file /secure/omp.token --ca /secure/omp-ca.crt \\
       --request-id client_job_1 --generation GENERATION_FROM_SESSION
 
-EXPLICIT PLAINTEXT LAN HTTP (UNENCRYPTED)
-  Only choose this when you accept that network observers or attackers can read
-  or alter traffic, steal the bearer token, and control this agent's tools.
+EXPLICIT PLAINTEXT LAN HTTP (UNENCRYPTED, NO AUTHENTICATION)
+  Anyone who can reach this port can control this agent and its tools. Network
+  observers can read or alter all messages and responses. Choose HTTPS or an SSH
+  tunnel instead unless you explicitly accept this risk.
   On the OMP host, explicitly save HTTP and then restart the listener:
 
     node /abs/repo/cli.mjs config --host 192.0.2.10 --port 9443 --protocol http
 
-  No certificate is required. Saved TLS paths are retained but never read for
-  HTTP. On every client connection command, opt in explicitly:
+  No token, certificate, or private key is created or required. Saved custom TLS
+  paths are retained but never read. --token-file and --ca are rejected without
+  reading them. On every non-loopback client connection, opt in explicitly:
 
     node /abs/repo/cli.mjs session --endpoint http://192.0.2.10:9443 \\
-      --token-file /secure/omp.token --allow-http
+      --allow-http
     node /abs/repo/cli.mjs send --endpoint http://192.0.2.10:9443 \\
-      --token-file /secure/omp.token --allow-http --message-file /abs/prompt.txt
+      --allow-http --message-file /abs/prompt.txt
     node /abs/repo/cli.mjs request --endpoint http://192.0.2.10:9443 \\
-      --token-file /secure/omp.token --allow-http \\
+      --allow-http \\
       --request-id REQUEST_ID --generation GENERATION_FROM_SESSION
 
   --allow-http is also required for a discovered non-loopback HTTP endpoint.
-  Generated recovery/query commands retain this flag. It never removes bearer
-  authentication, permits redirects, or disables HTTPS certificate verification.
+  Generated recovery/query commands retain this flag and contain no HTTP token
+  file. The flag never permits redirects or disables HTTPS certificate verification.
 
 SECURITY AND PROTOCOL BOUNDARY
   This is the narrow HTTP/JSON protocol v1 (session metadata, submit, and request
@@ -240,6 +255,7 @@ SECURITY AND PROTOCOL BOUNDARY
   session-switch endpoint. Nevertheless, a token grants the ability to instruct
   a trusted agent, which may exercise all capabilities/tools configured for that
   agent. It is authentication, not a sandbox. Treat it as a high-value secret.
+  HTTP has no authentication: all reachable callers have that same control.
 
   Tokens, request records, and generation IDs are runtime state. They have no
   durability across OMP shutdown or a committed session change; reconnect and
@@ -403,7 +419,7 @@ function parseEndpoint(raw, allowHttp) {
     throw new CliError("endpoint must be an origin without a path, query, or fragment");
   }
   if (url.protocol === "http:" && !isLoopbackHostname(url.hostname) && !allowHttp) {
-    throw new CliError("Non-loopback HTTP exposes tokens and content in plaintext; use HTTPS or explicitly pass --allow-http");
+    throw new CliError("Non-loopback HTTP is unencrypted with NO authentication; anyone reaching the port can control the agent. Use HTTPS or explicitly pass --allow-http");
   }
   return url;
 }
@@ -455,9 +471,13 @@ function validateDescriptor(value, fileName) {
   if (typeof value.instanceId !== "string" || `${value.instanceId}.json` !== fileName) return undefined;
   if (!UUID_PATTERN.test(value.instanceId)) return undefined;
   if (!Number.isSafeInteger(value.pid) || value.pid <= 0) return undefined;
-  if (typeof value.endpoint !== "string" || typeof value.tokenFile !== "string") return undefined;
-  if (value.tokenFile.length === 0 || !isAbsolute(value.tokenFile)) return undefined;
-  if (value.tokenFile !== join(rootDir(), "instances", `${value.instanceId}.token`)) return undefined;
+  if (typeof value.endpoint !== "string") return undefined;
+  let protocol;
+  try { protocol = new URL(value.endpoint).protocol; } catch { return undefined; }
+  if (protocol === "https:") {
+    if (typeof value.tokenFile !== "string" || !isAbsolute(value.tokenFile)) return undefined;
+    if (value.tokenFile !== join(rootDir(), "instances", `${value.instanceId}.token`)) return undefined;
+  } else if (protocol !== "http:" || value.tokenFile !== undefined) return undefined;
   if (!Number.isSafeInteger(value.generation) || value.generation <= 0) return undefined;
   if (value.sessionId !== null && typeof value.sessionId !== "string") return undefined;
   return value;
@@ -531,8 +551,8 @@ async function resolveConnection(options) {
   if (instanceOption !== undefined && (endpointOption !== undefined || tokenFileOption !== undefined)) {
     throw new CliError("--instance cannot be combined with --endpoint or --token-file");
   }
-  if ((endpointOption === undefined) !== (tokenFileOption === undefined)) {
-    throw new CliError("--endpoint and --token-file must be specified together");
+  if (endpointOption === undefined && tokenFileOption !== undefined) {
+    throw new CliError("--token-file requires an explicit HTTPS --endpoint");
   }
 
   let endpoint;
@@ -555,15 +575,19 @@ async function resolveConnection(options) {
   if (caOption !== undefined && endpoint.protocol !== "https:") {
     throw new CliError("--ca is valid only for an HTTPS endpoint");
   }
-  const [{ token, tokenFile }, caDetails] = await Promise.all([
-    readPrivateToken(tokenPath),
-    readCa(caOption),
-  ]);
+  let credentials;
+  let caDetails;
+  if (endpoint.protocol === "http:") {
+    if (tokenFileOption !== undefined) throw new CliError("HTTP has NO authentication; --token-file is forbidden and was not read");
+  } else {
+    if (!tokenPath) throw new CliError("HTTPS requires --token-file with a private bearer token file");
+    [credentials, caDetails] = await Promise.all([readPrivateToken(tokenPath), readCa(caOption)]);
+  }
 
   return {
     endpoint,
-    token,
-    tokenFile,
+    token: credentials?.token,
+    tokenFile: credentials?.tokenFile,
     ca: caDetails?.ca,
     caFile: caDetails?.caFile,
     instanceId,
@@ -590,8 +614,8 @@ async function requestJson(connection, method, route, body, timeoutMs = HTTP_TIM
   const requestBody = body === undefined ? undefined : stringifyRequestBody(body);
   const headers = {
     Accept: "application/json",
-    Authorization: `Bearer ${connection.token}`,
   };
+  if (target.protocol === "https:") headers.Authorization = `Bearer ${connection.token}`;
   if (requestBody !== undefined) {
     headers["Content-Type"] = "application/json";
     headers["Content-Length"] = String(requestBody.length);
@@ -699,7 +723,8 @@ function requestQueryCommand(connection, requestId, generation) {
   if (connection.mode === "local") {
     parts.push("--instance", connection.instanceId);
   } else {
-    parts.push("--endpoint", connection.endpoint.origin, "--token-file", connection.tokenFile);
+    parts.push("--endpoint", connection.endpoint.origin);
+    if (connection.tokenFile) parts.push("--token-file", connection.tokenFile);
   }
   if (connection.caFile) parts.push("--ca", connection.caFile);
   if (connection.allowHttp) parts.push("--allow-http");

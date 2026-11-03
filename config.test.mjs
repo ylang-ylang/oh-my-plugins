@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -39,8 +39,8 @@ test('LAN off keeps saved IP and certificates while exposing only plain loopback
     assert.equal(after.host, '192.0.2.10');
     assert.equal(after.tlsCert, saved.tlsCert);
     assert.equal(after.tlsKey, saved.tlsKey);
-    await assert.rejects(writeConfig({ host: saved.host, port: 0, lanEnabled: true }));
-    assert.equal((await readConfig()).lanEnabled, false);
+    await writeConfig({ host: saved.host, port: 0, lanEnabled: true });
+    assert.equal((await readConfig()).lanEnabled, true);
   } finally { await server.close(); }
 });
 
@@ -73,7 +73,7 @@ test('CLI host selection enables LAN and explicit off preserves setup for later 
   assert.equal((await readConfig()).lanEnabled, false);
 });
 
-test('explicit HTTP ignores retained TLS files without removing authentication', async t => {
+test('anonymous HTTP ignores retained TLS files and preserves browser-origin rejection', async t => {
   const root = await fixture(t);
   await writeConfig({ host: '127.0.0.1', port: 0, protocol: 'http',
     tlsCert: join(root, 'missing.crt'), tlsKey: join(root, 'missing.key') });
@@ -83,12 +83,9 @@ test('explicit HTTP ignores retained TLS files without removing authentication',
   });
   try {
     assert.equal(new URL(server.endpoint).protocol, 'http:');
-    assert.equal((await fetch(server.endpoint + '/v1/session')).status, 401);
-    const token = (await readFile(join(root, 'instances', server.instanceId + '.token'), 'utf8')).trim();
-    const headers = { Authorization: 'Bearer ' + token };
-    assert.equal((await fetch(server.endpoint + '/v1/session', { headers })).status, 200);
+    assert.equal((await fetch(server.endpoint + '/v1/session')).status, 200);
     assert.equal((await fetch(server.endpoint + '/v1/session', {
-      headers: { ...headers, Origin: 'https://attacker.invalid' },
+      headers: { Origin: 'https://attacker.invalid' },
     })).status, 403);
     const saved = await readConfig();
     assert.equal(saved.tlsCert, join(root, 'missing.crt'));
@@ -108,8 +105,8 @@ test('CLI LAN transition defaults to HTTPS and plaintext requires an explicit pr
   });
   await run(['--port', '0']);
   assert.equal((await readConfig()).protocol, 'http');
-  await assert.rejects(run(['--host', '192.0.2.20']));
-  assert.equal((await readConfig()).host, '127.0.0.1');
+  await run(['--host', '192.0.2.20']);
+  assert.equal((await readConfig()).protocol, 'https');
   await run(['--host', '192.0.2.20', '--protocol', 'http']);
   assert.equal((await readConfig()).protocol, 'http');
   await run(['--lan', 'off']);

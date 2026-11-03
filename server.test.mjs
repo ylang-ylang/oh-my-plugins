@@ -5,11 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from './server.mjs';
 import { RequestController } from './controller.mjs';
+import { writeConfig } from './config.mjs';
+import https from 'node:https';
 
-async function endpoint(t) {
+async function endpoint(t, protocol = 'http') {
   const root = await mkdtemp(join(tmpdir(), 'omp-lan-rpc-test-'));
   const previous = process.env.OMP_LAN_RPC_DIR;
   process.env.OMP_LAN_RPC_DIR = root;
+  if (protocol === 'https') await writeConfig({ host: '127.0.0.1', port: 0, protocol });
   const controller = new RequestController({ sessionId: 'test-session', cwd: root,
     isIdle: () => true, hasPendingMessages: () => false, deliver: () => {} });
   const server = await startServer({ getSession: () => controller.session(),
@@ -21,23 +24,45 @@ async function endpoint(t) {
     else process.env.OMP_LAN_RPC_DIR = previous;
     await rm(root, { recursive: true, force: true });
   });
-  const descriptor = JSON.parse(await readFile(join(root, 'instances', server.instanceId + '.json'), 'utf8'));
-  const token = (await readFile(descriptor.tokenFile, 'utf8')).trim();
-  return { controller, server, root, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } };
+  return { controller, server, root, headers: { 'Content-Type': 'application/json' } };
 }
 
-test('unauthenticated callers and browser origins cannot access or submit to a session', async t => {
+test('HTTP is anonymous, creates no credentials, and still rejects browser origins', async t => {
   const h = await endpoint(t);
-  const unauthorized = await fetch(h.server.endpoint + '/v1/session');
-  assert.equal(unauthorized.status, 401);
-  const invalid = await fetch(h.server.endpoint + '/v1/session', { headers: { Authorization: 'Bearer invalid' } });
-  assert.equal(invalid.status, 401);
+  const response = await fetch(h.server.endpoint + '/v1/session');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).sessionId, 'test-session');
+  const descriptor = JSON.parse(await readFile(join(h.root, 'instances', h.server.instanceId + '.json'), 'utf8'));
+  assert.equal('tokenFile' in descriptor, false);
+  assert.deepEqual(await readdir(join(h.root, 'instances')), [h.server.instanceId + '.json']);
+  assert.equal((await readdir(h.root)).includes('tls'), false);
   const browser = await fetch(h.server.endpoint + '/v1/requests', {
     method: 'POST', headers: { ...h.headers, Origin: 'https://attacker.invalid' },
     body: JSON.stringify({ generation: h.controller.generation, requestId: 'browser', message: 'should never queue' }),
   });
   assert.equal(browser.status, 403);
   assert.equal(h.controller.session().queueDepth, 0);
+});
+
+test('HTTPS requires Bearer auth regardless of spoofed transport headers and verifies TLS', async t => {
+  const h = await endpoint(t, 'https');
+  const ca = await readFile(h.server.certFile);
+  const get = (headers = {}, trust = ca) => new Promise((resolve, reject) => {
+    const request = https.get(h.server.endpoint + '/v1/session', { ca: trust, headers, rejectUnauthorized: true }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString() }));
+    });
+    request.on('error', reject);
+  });
+  await assert.rejects(get({}, null));
+  const spoofed = await get({ 'X-Forwarded-Proto': 'http', Forwarded: 'proto=http' });
+  assert.equal(spoofed.status, 401);
+  assert.equal((await get({ Authorization: 'Bearer invalid' })).status, 401);
+  const authorized = await get({ Authorization: 'Bearer ' + h.server.token });
+  assert.equal(authorized.status, 200);
+  assert.equal(authorized.body.includes(h.server.token), false);
+  assert.equal((await get({ Authorization: 'Bearer ' + h.server.token, Origin: 'https://attacker.invalid' })).status, 403);
 });
 
 test('HTTP request replay is idempotent and rejects stale sessions and conflicting IDs', async t => {

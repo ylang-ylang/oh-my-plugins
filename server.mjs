@@ -4,7 +4,6 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   rename,
   unlink,
 } from "node:fs/promises";
@@ -13,6 +12,7 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
 import { listenerConfig, readConfig, rootDir } from "./config.mjs";
+import { prepareTls } from "./tls.mjs";
 
 const PROTOCOL_VERSION = 1;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -325,7 +325,7 @@ function validateQuery(url, expectedKeys) {
 }
 
 async function routeRequest(req, res, context) {
-  if (!hasSingleBearerToken(req, context.tokenDigest)) {
+  if (context.tokenDigest !== undefined && !hasSingleBearerToken(req, context.tokenDigest)) {
     sendError(req, res, 401, "unauthorized", "valid Bearer authentication is required", {
       "WWW-Authenticate": 'Bearer realm="omp-lan-rpc"',
     });
@@ -471,14 +471,8 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
   }
 
   const config = listenerConfig(await readConfig());
-  let tls;
-  if (config.protocol === "https") {
-    const [cert, key] = await Promise.all([
-      readFile(config.tlsCert),
-      readFile(config.tlsKey),
-    ]);
-    tls = { cert, key };
-  }
+  // Only the actual listener configuration controls authentication, never proxy headers.
+  const tls = await prepareTls(config);
 
   const directory = rootDir();
   const instances = join(directory, "instances");
@@ -486,17 +480,19 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
   await ensurePrivateDirectory(instances);
 
   const instanceId = randomUUID();
-  const token = randomBytes(32).toString("base64url");
-  const tokenDigest = createHash("sha256").update(token, "utf8").digest();
-  const tokenFile = join(instances, `${instanceId}.token`);
+  const token = tls ? randomBytes(32).toString("base64url") : undefined;
+  const tokenDigest = token === undefined ? undefined : createHash("sha256").update(token, "utf8").digest();
+  const tokenFile = tls ? join(instances, `${instanceId}.token`) : undefined;
   const descriptorFile = join(instances, `${instanceId}.json`);
   let server;
   let tokenCreated = false;
   let descriptorCreated = false;
 
   try {
-    await writePrivateFileExclusive(tokenFile, `${token}\n`);
-    tokenCreated = true;
+    if (tokenFile !== undefined) {
+      await writePrivateFileExclusive(tokenFile, `${token}\n`);
+      tokenCreated = true;
+    }
 
     const context = {
       instanceId,
@@ -526,7 +522,7 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
 
     server = tls === undefined
       ? createHttpServer({ maxHeaderSize: 16 * 1024 }, handler)
-      : createHttpsServer({ ...tls, maxHeaderSize: 16 * 1024 }, handler);
+      : createHttpsServer({ cert: tls.cert, key: tls.key, maxHeaderSize: 16 * 1024 }, handler);
     server.headersTimeout = 10_000;
     server.requestTimeout = BODY_TIMEOUT_MS;
     server.keepAliveTimeout = 5_000;
@@ -569,6 +565,9 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
     return {
       endpoint,
       instanceId,
+      token,
+      tokenFile,
+      certFile: tls?.certFile,
       close() {
         if (closing !== undefined) return closing;
         closing = (async () => {
@@ -581,7 +580,7 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
           await unlink(descriptorFile).catch((error) => {
             if (error?.code !== "ENOENT" && closeError === undefined) closeError = error;
           });
-          await unlink(tokenFile).catch((error) => {
+          if (tokenFile !== undefined) await unlink(tokenFile).catch((error) => {
             if (error?.code !== "ENOENT" && closeError === undefined) closeError = error;
           });
           if (closeError !== undefined) throw closeError;
