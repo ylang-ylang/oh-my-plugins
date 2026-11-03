@@ -93,7 +93,7 @@ export default function lanRpc(pi) {
 
   function requireNoWork() {
     if (controller?.hasWork()) {
-      throw new Error('仍有待处理请求；请等待完成，或先用 /lan stop 明确停止接入。');
+      throw new Error('Requests are still pending. Wait for completion or explicitly stop access with /lanrpc stop.');
     }
   }
 
@@ -111,7 +111,7 @@ export default function lanRpc(pi) {
   for (const event of ['session_before_switch', 'session_before_branch', 'session_before_tree']) {
     pi.on(event, async (_event, ctx) => {
       if (controller?.hasWork()) {
-        ctx.ui.notify('LAN RPC 有待处理请求。请等待完成，或 /lan stop 后再切换会话。', 'warning');
+        ctx.ui.notify('LAN RPC has pending requests. Wait for completion or use /lanrpc stop before switching sessions.', 'warning');
         return { cancel: true };
       }
       // The native bar belongs to the TUI process, not to an individual chat.
@@ -134,35 +134,46 @@ export default function lanRpc(pi) {
     return resolve(value.startsWith('~/') ? `${homedir()}/${value.slice(2)}` : value);
   }
 
-  async function configureLan(ctx, config) {
-    const address = Object.values(networkInterfaces()).flat()
-      .find(item => item && !item.internal && item.family === 'IPv4')?.address;
-    const suggested = isLoopbackHost(config.host) ? (address || '') : config.host;
-    const hostInput = await ctx.ui.input(`局域网监听 IP${suggested ? `（留空使用 ${suggested}）` : ''}`, suggested);
-    if (hostInput === undefined) return;
-    const host = hostInput.trim() || suggested;
-    if (!isIP(host) || isLoopbackHost(host) || host === '0.0.0.0' || host === '::') {
-      throw new Error('请填写本机具体的非回环 IP；不要填写通配监听地址。');
+  async function configureLan(ctx, config, configure) {
+    let next = { ...config, lanEnabled: true };
+    if (configure || isLoopbackHost(config.host)) {
+      const address = Object.values(networkInterfaces()).flat()
+        .find(item => item && !item.internal && item.family === 'IPv4')?.address;
+      const suggested = isLoopbackHost(config.host) ? (address || '') : config.host;
+      const hostInput = await ctx.ui.input(`LAN bind IP${suggested ? ` (leave blank for ${suggested})` : ''}`, suggested);
+      if (hostInput === undefined) return;
+      const host = hostInput.trim() || suggested;
+      if (!isIP(host) || isLoopbackHost(host) || host === '0.0.0.0' || host === '::') {
+        throw new Error('Enter a specific non-loopback IP address on this machine, not a wildcard address.');
+      }
+      const portInput = await ctx.ui.input(`Port (leave blank for ${config.port}; 0 selects a free port)`, String(config.port));
+      if (portInput === undefined) return;
+      const portText = portInput.trim() || String(config.port);
+      if (!/^\d+$/.test(portText) || Number(portText) > 65535) throw new Error('Port must be an integer from 0 to 65535.');
+      next = { ...next, host, port: Number(portText) };
     }
-    const portInput = await ctx.ui.input(`端口（留空使用 ${config.port}；0 为自动分配）`, String(config.port));
-    if (portInput === undefined) return;
-    const portText = portInput.trim() || String(config.port);
-    if (!/^\d+$/.test(portText) || Number(portText) > 65535) throw new Error('端口必须是 0..65535 的整数。');
-    const certInput = await ctx.ui.input('TLS 证书路径（已有路径可留空保留）', config.tlsCert || '');
-    if (certInput === undefined) return;
-    const keyInput = await ctx.ui.input('TLS 私钥路径（不是私钥内容；已有路径可留空保留）', config.tlsKey || '');
-    if (keyInput === undefined) return;
-    const cert = certInput.trim() || config.tlsCert;
-    const key = keyInput.trim() || config.tlsKey;
-    if (!cert || !key) throw new Error('开启局域网必须提供 TLS 证书和私钥文件。');
-    return { ...config, host, port: Number(portText), tlsCert: expandPath(cert), tlsKey: expandPath(key), lanEnabled: true };
+    const protocol = await ctx.ui.select('LAN protocol', ['HTTPS (recommended)', 'HTTP (unencrypted)']);
+    if (!protocol) return;
+    next.protocol = protocol === 'HTTP (unencrypted)' ? 'http' : 'https';
+    if (next.protocol === 'https' && (configure || !next.tlsCert || !next.tlsKey)) {
+      const certInput = await ctx.ui.input('TLS certificate path (leave blank to keep the saved path)', config.tlsCert || '');
+      if (certInput === undefined) return;
+      const keyInput = await ctx.ui.input('TLS private key FILE path, not key contents (leave blank to keep the saved path)', config.tlsKey || '');
+      if (keyInput === undefined) return;
+      const cert = certInput.trim() || config.tlsCert;
+      const key = keyInput.trim() || config.tlsKey;
+      if (!cert || !key) throw new Error('A TLS certificate and private key file are required for HTTPS.');
+      next.tlsCert = expandPath(cert);
+      next.tlsKey = expandPath(key);
+    }
+    return next;
   }
 
   async function validateTls(config) {
     const [cert, key] = await Promise.all([readFile(config.tlsCert), readFile(config.tlsKey)]);
     createSecureContext({ cert, key });
     if (!new X509Certificate(cert).checkIP(config.host)) {
-      throw new Error('TLS 证书的 IP SAN 与监听 IP 不匹配；请使用匹配该 IP 的证书。');
+      throw new Error('The TLS certificate IP SAN does not match the bind IP. Use a certificate valid for that IP.');
     }
   }
 
@@ -171,14 +182,16 @@ export default function lanRpc(pi) {
     const previous = await readConfig();
     let next = { ...previous, lanEnabled: enabled };
     if (enabled) {
-      if (configure || isLoopbackHost(next.host) || !next.tlsCert || !next.tlsKey) {
-        next = await configureLan(ctx, next);
-        if (!next) return;
-      }
-      // Validate all files before touching a working listener or saved defaults.
-      await validateTls(next);
-      if (!(await ctx.ui.confirm('开启局域网访问？',
-        `监听 ${next.host}:${next.port || '自动端口'}，使用 HTTPS 和会话令牌。令牌持有者可以驱动当前 agent 的工具。此设置也将用于后续新会话。`))) return;
+      next = await configureLan(ctx, next, configure);
+      if (!next) return;
+      // HTTP deliberately ignores saved TLS files; HTTPS validates before mutation.
+      if (next.protocol === 'https') await validateTls(next);
+      const encrypted = next.protocol === 'https';
+      const warning = encrypted
+        ? 'Use HTTPS and a session token. Token holders can use this agent\'s tools.'
+        : 'Bearer tokens, messages, and responses will travel in plaintext. Anyone who can observe or alter this network traffic may steal the token and control this agent\'s tools.';
+      if (!(await ctx.ui.confirm(encrypted ? 'Enable LAN access?' : 'Enable unencrypted HTTP LAN access?',
+        `Listen on ${next.host}:${next.port || 'automatic port'}. ${warning} These settings also apply to future sessions.`))) return;
     }
     // Prompts can remain open while requests arrive: re-check before freezing
     // admission and changing the configuration. No work is silently discarded.
@@ -190,7 +203,7 @@ export default function lanRpc(pi) {
       await writeConfig(next);
       written = true;
       await start(ctx);
-      ctx.ui.notify(enabled ? '局域网访问已开启。用 /lan info 查看连接信息。' : '局域网访问已关闭；本机接口保留，原 IP 和证书设置已保存。', 'info');
+      ctx.ui.notify(enabled ? 'LAN access enabled. Use /lanrpc info for connection details.' : 'LAN access disabled. Local access remains available; the LAN IP and TLS paths are saved.', 'info');
     } catch (error) {
       if (written) {
         try {
@@ -198,7 +211,7 @@ export default function lanRpc(pi) {
           if (wasRunning) await start(ctx);
           else await stop(ctx);
         } catch (restoreError) {
-          throw new Error(`设置失败：${error.message}；恢复失败：${restoreError.message}。请用 /lan info 检查当前状态。`);
+          throw new Error(`Configuration failed: ${error.message}; recovery failed: ${restoreError.message}. Check the current state with /lanrpc info.`);
         }
       }
       throw error;
@@ -208,29 +221,29 @@ export default function lanRpc(pi) {
   }
 
   function showInfo(ctx) {
-    const labels = { off: '已停止', local: '仅本机', lan: '局域网已开启', error: '错误／已暂停' };
+    const labels = { off: 'Stopped', local: 'Local only', lan: 'LAN enabled', error: 'Error / paused' };
     ctx.ui.notify(server
-      ? `${labels[mode()]}\n${server.endpoint}\ninstance=${server.instanceId}\n${JSON.stringify(controller.session())}\n令牌内容不会显示；请通过私有实例文件获取。`
-      : 'LAN RPC 已停止。使用 /lan start 启动，或 /lan on 开启局域网。', 'info');
+      ? `${labels[mode()]}\n${server.endpoint}\ninstance=${server.instanceId}\n${JSON.stringify(controller.session())}\nToken contents are hidden; use the private instance file to retrieve the token.`
+      : 'LAN RPC is stopped. Use /lanrpc start to start access, or /lanrpc on to enable LAN access.', 'info');
   }
 
-  pi.registerCommand('lan', {
-    description: 'LAN RPC 控制：菜单 | info | on | off | configure | start | stop | restart',
+  pi.registerCommand('lanrpc', {
+    description: 'LAN RPC controls: menu | info | on | off | configure | start | stop | restart',
     handler: async (args, ctx) => {
       let command = args.trim();
       if (!command) {
         const choices = [
-          mode() === 'lan' ? '关闭局域网访问（保留本机）' : '开启局域网访问',
-          '配置并开启局域网', '查看连接信息',
-          server ? '停止所有接入' : '启动接入（使用已保存设置）',
-          '返回',
+          mode() === 'lan' ? 'Disable LAN access (keep local access)' : 'Enable LAN access',
+          'Configure and enable LAN', 'Connection details',
+          server ? 'Stop all access' : 'Start access (use saved settings)',
+          'Back',
         ];
         const choice = await ctx.ui.select('LAN RPC', choices);
-        if (!choice || choice === '返回') return;
+        if (!choice || choice === 'Back') return;
         command = ({
-          '关闭局域网访问（保留本机）': 'off', '开启局域网访问': 'on',
-          '配置并开启局域网': 'configure', '查看连接信息': 'info',
-          '停止所有接入': 'stop', '启动接入（使用已保存设置）': 'start',
+          'Disable LAN access (keep local access)': 'off', 'Enable LAN access': 'on',
+          'Configure and enable LAN': 'configure', 'Connection details': 'info',
+          'Stop all access': 'stop', 'Start access (use saved settings)': 'start',
         })[choice];
       }
       try {
@@ -239,14 +252,14 @@ export default function lanRpc(pi) {
           await schedule(() => changeLan(ctx, command !== 'off', command === 'configure'));
         } else if (command === 'stop') {
           await schedule(() => stop(ctx));
-          ctx.ui.notify('所有接入已停止；已经开始的 agent 工作不会被撤销。', 'info');
+          ctx.ui.notify('All access stopped. Agent work already started is not rolled back.', 'info');
         } else if (command === 'start' || command === 'restart') {
           await schedule(async () => {
             requireNoWork();
             await start(ctx);
           });
         } else {
-          ctx.ui.notify('用法：/lan [info|on|off|configure|start|stop|restart]', 'error');
+          ctx.ui.notify('Usage: /lanrpc [info|on|off|configure|start|stop|restart]', 'error');
         }
       } catch (error) {
         report(ctx, error);

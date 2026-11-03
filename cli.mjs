@@ -71,7 +71,7 @@ INSTALL AND START
   Once prerequisites are ready, install from GitHub and restart OMP:
     omp plugin install github:ylang-ylang/omp-lan-rpc
   Fully exit and relaunch OMP after installation/upgrades. The radar layout is
-  prepared before native TUI construction; plugin hot reload or /lan restart
+  prepared before native TUI construction; plugin hot reload or /lanrpc restart
   alone cannot rebuild an already-created status bar.
 
   Default user-install client location (custom/XDG data roots may differ):
@@ -97,7 +97,7 @@ USAGE
   node /abs/repo/cli.mjs help
   node /abs/repo/cli.mjs list
   node /abs/repo/cli.mjs config [--host HOST] [--port PORT]
-                                  [--lan on|off]
+                                  [--lan on|off] [--protocol http|https]
                                   [--tls-cert PATH] [--tls-key PATH]
   node /abs/repo/cli.mjs session [CONNECTION]
   node /abs/repo/cli.mjs send [CONNECTION] --message-file PATH
@@ -119,12 +119,15 @@ CONNECTION
     --token-file PATH     Private file containing the bearer token.
     --ca CERT             Optional CA bundle for TLS verification. This may also
                           be used with local discovery of an HTTPS instance.
+    --allow-http          Explicitly allow non-loopback plaintext HTTP, including
+                          a LAN endpoint selected through local discovery.
 
   --endpoint and --token-file are required together and cannot be combined with
-  --instance. HTTP is accepted only for a loopback endpoint. URLs cannot contain
-  credentials, a path, query, or fragment. Redirects and TLS downgrade are never
-  followed. TLS certificate and hostname verification are always enabled; there
-  is no insecure mode.
+  --instance. Loopback HTTP works by default. Non-loopback HTTP requires
+  --allow-http: bearer tokens, messages, and responses are exposed in plaintext.
+  URLs cannot contain credentials, a path, query, or fragment. Redirects are never
+  followed, even with --allow-http. HTTPS always verifies certificates and
+  hostnames; --allow-http does not disable TLS verification or allow downgrade.
 
 COMMANDS
   list
@@ -133,14 +136,15 @@ COMMANDS
     health check. Stale/invalid files are reported but never removed.
 
   config
-    With no flags, print the saved host, port, LAN toggle, and TLS paths (never
-    key contents). Setter flags update only the named saved settings. An explicit
-    --host also sets the LAN toggle from whether that host is non-loopback unless
-    --lan is given. Changes apply only to the next server startup; they do not
-    alter the listener in a currently running OMP session. --lan off retains the
-    saved host and TLS paths. With a saved non-loopback host, the next startup
-    keeps the local API available over plain HTTP on 127.0.0.1. A saved loopback
-    host retains its existing HTTP or HTTPS setup.
+    With no flags, print the saved host, port, LAN toggle, protocol, and TLS paths
+    (never key contents). --protocol http explicitly opts into plaintext;
+    --protocol https requires certificate and key paths when enabled. Legacy TLS
+    configurations remain HTTPS. Moving from a loopback host to LAN defaults to
+    HTTPS unless --protocol http is explicitly given. --host also sets the LAN
+    toggle unless --lan is given. Changes apply only to the next server startup,
+    not the current listener. --lan off retains the saved host, protocol, and TLS
+    paths but exposes only plain HTTP on 127.0.0.1 for a saved LAN host. HTTP never
+    reads saved TLS files; switching back to HTTPS reuses them.
 
   session
     Print current protocol/session metadata as JSON.
@@ -159,20 +163,21 @@ COMMANDS
     exit nonzero.
 
 OMP LIFECYCLE AND LIMITS
-  In OMP, /lan opens the LAN RPC control menu. /lan on enables LAN access
-  (first use asks for an IP, port, certificate and key); /lan off disables LAN
-  but keeps loopback access and remembers the LAN settings. /lan configure
-  edits the settings and enables LAN. These actions save future-session defaults
-  and restart only the current listener; other running sessions are unchanged.
+  In OMP, /lanrpc opens the LAN RPC control menu. /lanrpc on enables LAN access
+  (first use asks for an IP and port); choose HTTPS (recommended, certificate and
+  key required) or HTTP (unencrypted, explicit risk confirmation). /lanrpc off
+  keeps loopback access and saved settings. /lanrpc configure edits and enables
+  LAN. These actions save future-session defaults and restart only the current
+  listener; other running sessions are unchanged.
   The native status line shows a small radar indicator, not the endpoint URL.
   Its md-radar glyph (U+F0437) requires a supporting Nerd Font in your terminal;
   color follows OMP's native theme. Use the menu/info to distinguish local/LAN.
-  Use /lan info for connection details; /lan start, stop, restart control the
+  Use /lanrpc info for connection details; /lanrpc start, stop, restart control the
   current listener. Restart rotates the instance and token. Session/branch/tree
   switches and listener reconfiguration are refused while remote work is pending.
-  /lan stop interrupts protocol records, not already-started agent/tool effects.
+  /lanrpc stop interrupts protocol records, not already-started agent/tool effects.
   If another extension cancels a transition after the listener closed, restore
-  service with /lan start. The former /lan-rpc command is no longer registered.
+  service with /lanrpc start. Earlier command names are no longer registered.
 
   One generation has 64 queued/running slots and 256 total idempotency records;
   accepted IDs are never silently evicted. Message text is limited to 48 KiB and
@@ -189,11 +194,11 @@ LOCAL EXAMPLES (NO CURL)
 EXPLICIT LAN TLS
   Configure the session endpoint before restarting OMP:
 
-    node /abs/repo/cli.mjs config --host 192.0.2.10 --port 9443 \\
+    node /abs/repo/cli.mjs config --host 192.0.2.10 --port 9443 --protocol https \\
       --tls-cert /abs/tls/server.crt --tls-key /abs/tls/server.key
 
-  A non-loopback listener requires both certificate and key. The certificate SAN
-  must match the endpoint hostname or IP exactly (an IP endpoint needs an IP SAN).
+  HTTPS requires both certificate and key. The certificate SAN must match the
+  endpoint hostname or IP exactly (an IP endpoint needs an IP SAN).
   Copy the instance token file to the client only through a secure channel, keep
   it private (for example chmod 600), and connect without putting the token on
   argv or stdout:
@@ -206,6 +211,28 @@ EXPLICIT LAN TLS
     node /abs/repo/cli.mjs request --endpoint https://192.0.2.10:9443 \\
       --token-file /secure/omp.token --ca /secure/omp-ca.crt \\
       --request-id client_job_1 --generation GENERATION_FROM_SESSION
+
+EXPLICIT PLAINTEXT LAN HTTP (UNENCRYPTED)
+  Only choose this when you accept that network observers or attackers can read
+  or alter traffic, steal the bearer token, and control this agent's tools.
+  On the OMP host, explicitly save HTTP and then restart the listener:
+
+    node /abs/repo/cli.mjs config --host 192.0.2.10 --port 9443 --protocol http
+
+  No certificate is required. Saved TLS paths are retained but never read for
+  HTTP. On every client connection command, opt in explicitly:
+
+    node /abs/repo/cli.mjs session --endpoint http://192.0.2.10:9443 \\
+      --token-file /secure/omp.token --allow-http
+    node /abs/repo/cli.mjs send --endpoint http://192.0.2.10:9443 \\
+      --token-file /secure/omp.token --allow-http --message-file /abs/prompt.txt
+    node /abs/repo/cli.mjs request --endpoint http://192.0.2.10:9443 \\
+      --token-file /secure/omp.token --allow-http \\
+      --request-id REQUEST_ID --generation GENERATION_FROM_SESSION
+
+  --allow-http is also required for a discovered non-loopback HTTP endpoint.
+  Generated recovery/query commands retain this flag. It never removes bearer
+  authentication, permits redirects, or disables HTTPS certificate verification.
 
 SECURITY AND PROTOCOL BOUNDARY
   This is the narrow HTTP/JSON protocol v1 (session metadata, submit, and request
@@ -283,6 +310,7 @@ const CONNECTION_SPEC = Object.freeze({
   "--endpoint": "value",
   "--token-file": "value",
   "--ca": "value",
+  "--allow-http": "boolean",
 });
 
 function connectionSpec(extra = {}) {
@@ -354,7 +382,7 @@ function isLoopbackHostname(hostname) {
   return firstOctet === 127;
 }
 
-function parseEndpoint(raw) {
+function parseEndpoint(raw, allowHttp) {
   const originMatch = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)\/?$/.exec(raw);
   if (originMatch === null) {
     throw new CliError("endpoint must be an origin without credentials, a path, query, or fragment");
@@ -374,8 +402,8 @@ function parseEndpoint(raw) {
   if (url.pathname !== "/" || url.search || url.hash) {
     throw new CliError("endpoint must be an origin without a path, query, or fragment");
   }
-  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
-    throw new CliError("HTTP is forbidden for a non-loopback endpoint; configure HTTPS");
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname) && !allowHttp) {
+    throw new CliError("Non-loopback HTTP exposes tokens and content in plaintext; use HTTPS or explicitly pass --allow-http");
   }
   return url;
 }
@@ -498,6 +526,7 @@ async function resolveConnection(options) {
   const endpointOption = options["--endpoint"];
   const tokenFileOption = options["--token-file"];
   const caOption = options["--ca"];
+  const allowHttp = options["--allow-http"] === true;
 
   if (instanceOption !== undefined && (endpointOption !== undefined || tokenFileOption !== undefined)) {
     throw new CliError("--instance cannot be combined with --endpoint or --token-file");
@@ -511,13 +540,13 @@ async function resolveConnection(options) {
   let instanceId;
   let mode;
   if (endpointOption !== undefined) {
-    endpoint = parseEndpoint(endpointOption);
+    endpoint = parseEndpoint(endpointOption, allowHttp);
     tokenPath = tokenFileOption;
     mode = "remote";
   } else {
     const requestedInstance = instanceOption === undefined ? undefined : validateInstanceId(instanceOption);
     const descriptor = await selectLocalDescriptor(requestedInstance);
-    endpoint = parseEndpoint(descriptor.endpoint);
+    endpoint = parseEndpoint(descriptor.endpoint, allowHttp);
     tokenPath = descriptor.tokenFile;
     instanceId = descriptor.instanceId;
     mode = "local";
@@ -539,6 +568,7 @@ async function resolveConnection(options) {
     caFile: caDetails?.caFile,
     instanceId,
     mode,
+    allowHttp,
   };
 }
 
@@ -672,6 +702,7 @@ function requestQueryCommand(connection, requestId, generation) {
     parts.push("--endpoint", connection.endpoint.origin, "--token-file", connection.tokenFile);
   }
   if (connection.caFile) parts.push("--ca", connection.caFile);
+  if (connection.allowHttp) parts.push("--allow-http");
   parts.push("--request-id", requestId, "--generation", String(generation));
   return parts.map(shellQuote).join(" ");
 }
@@ -710,6 +741,7 @@ async function commandConfig(args) {
     "--host": "value",
     "--port": "value",
     "--lan": "value",
+    "--protocol": "value",
     "--tls-cert": "value",
     "--tls-key": "value",
   });
@@ -724,6 +756,14 @@ async function commandConfig(args) {
   const host = options["--host"];
   if (host !== undefined) {
     next.host = host;
+    changed = true;
+  }
+  // Moving from local defaults to LAN must not silently opt into plaintext.
+  if (host !== undefined && !isLoopbackHost(host) && isLoopbackHost(current.host)) {
+    next.protocol = "https";
+  }
+  if (options["--protocol"] !== undefined) {
+    next.protocol = options["--protocol"];
     changed = true;
   }
   if (options["--port"] !== undefined) {
@@ -752,6 +792,7 @@ async function commandConfig(args) {
     host: config.host,
     port: config.port,
     lanEnabled: config.lanEnabled,
+    protocol: config.protocol,
     tlsCert: config.tlsCert ?? null,
     tlsKey: config.tlsKey ?? null,
   });

@@ -14,8 +14,8 @@ import { randomBytes } from "node:crypto";
 
 const CONFIG_FILENAME = "config.json";
 const MAX_CONFIG_BYTES = 64 * 1024;
-const DEFAULT_CONFIG = Object.freeze({ host: "127.0.0.1", port: 0, lanEnabled: false });
-const CONFIG_KEYS = new Set(["host", "port", "tlsCert", "tlsKey", "lanEnabled"]);
+const DEFAULT_CONFIG = Object.freeze({ host: "127.0.0.1", port: 0, lanEnabled: false, protocol: "http" });
+const CONFIG_KEYS = new Set(["host", "port", "tlsCert", "tlsKey", "lanEnabled", "protocol"]);
 const LOOPBACKS = new BlockList();
 LOOPBACKS.addSubnet("127.0.0.0", 8, "ipv4");
 LOOPBACKS.addAddress("::1", "ipv6");
@@ -141,7 +141,12 @@ function validateConfig(value) {
     throw new TypeError("config.tlsCert and config.tlsKey must be provided together");
   }
 
-  const normalized = { host, port, lanEnabled };
+  // Legacy TLS configurations stay encrypted; a new LAN host defaults to HTTPS.
+  const protocol = value.protocol ?? (hasCert || !isLoopbackHost(host) ? "https" : "http");
+  if (protocol !== "http" && protocol !== "https") {
+    throw new TypeError("config.protocol must be http or https");
+  }
+  const normalized = { host, port, lanEnabled, protocol };
   if (hasCert) {
     if (typeof value.tlsCert !== "string" || value.tlsCert.length === 0) {
       throw new TypeError("config.tlsCert must be a non-empty path");
@@ -156,8 +161,8 @@ function validateConfig(value) {
     normalized.tlsKey = value.tlsKey;
   }
 
-  if (lanEnabled && !isLoopbackHost(host) && !hasCert) {
-    throw new TypeError("TLS certificate and key are required when LAN access is enabled");
+  if (protocol === "https" && !hasCert && (lanEnabled || isLoopbackHost(host))) {
+    throw new TypeError("TLS certificate and key are required for HTTPS");
   }
 
   return normalized;
@@ -166,7 +171,7 @@ function validateConfig(value) {
 export function listenerConfig(config) {
   const normalized = validateConfig(config);
   if (normalized.lanEnabled || isLoopbackHost(normalized.host)) return normalized;
-  return { host: DEFAULT_CONFIG.host, port: normalized.port, lanEnabled: false };
+  return { ...DEFAULT_CONFIG, port: normalized.port };
 }
 
 export async function readConfig() {

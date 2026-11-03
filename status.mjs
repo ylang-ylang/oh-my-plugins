@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 // Nerd Fonts' official glyphnames.json: md-radar = U+F0437.
 // OMP sanitizes ANSI in native status segments, so it owns the icon's color.
-// Local/LAN details belong in /lan info rather than a second footer or long label.
+// Local/LAN details belong in /lanrpc info rather than a second footer or long label.
 const RADAR = '\u{F0437}';
 const ICONS = Object.freeze({ off: '◌', local: RADAR, lan: RADAR, error: '!' });
 const STATUS_KEY = 'lan-rpc';

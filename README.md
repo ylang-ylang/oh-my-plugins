@@ -1,97 +1,97 @@
 # omp-lan-rpc
 
-为正在运行的普通 OMP 会话提供带认证的本机／局域网消息接口。安装后新启动的交互式 OMP 会话自动加载插件，不需要 watchdog，也不需要把 OMP 改成 `--mode rpc`。
+Authenticated local and LAN message access to a running, ordinary OMP session. Newly started interactive OMP sessions load the installed plugin automatically. No watchdog and no `--mode rpc` conversion are needed.
 
-## 安装前先检查依赖
+## Check dependencies first
 
-**在运行 OMP 的那台机器上执行下面的步骤，不是在另一台开发机上安装依赖。**
+**Run these steps on the machine that runs OMP, not on a different development machine.**
 
-| 依赖 | 用途 |
+| Dependency | Purpose |
 | --- | --- |
-| 已安装且能正常使用的 OMP | 宿主会话；本插件不是 OMP 本体的安装器 |
-| Git | 从 GitHub 安装插件 |
-| Bun | OMP 18.2.6 的插件安装器需要 PATH 中存在 `bun`；近期 OMP 版本已改用内嵌 Bun |
-| Node.js ≥22 | 运行独立命令行客户端 |
-| Homebrew（可选） | 安装 Bun、Git、Node 的一种方式；不是插件运行依赖 |
-| OpenSSL（开启局域网时） | 如果没有现成 TLS 证书，可用它生成证书 |
-| Nerd Fonts 字体（图标显示） | 显示 OMP 的终端需支持 `md-radar`（U+F0437）；SSH 场景在客户端终端配置字体，不影响网络接口功能 |
+| An installed, working OMP | Hosts the session; this plugin does not install OMP itself |
+| Git | Installs the plugin from GitHub |
+| Bun | OMP 18.2.6 needs `bun` on PATH during plugin installation; recent OMP releases use embedded Bun |
+| Node.js >=22 | Runs the standalone command-line client |
+| Homebrew (optional) | One way to install Bun, Git, and Node; not a plugin runtime dependency |
+| OpenSSL (optional, for HTTPS) | Can generate a certificate if you do not already have one |
+| Nerd Fonts (for the indicator) | The terminal displaying OMP needs the `md-radar` glyph (U+F0437); for SSH, configure the client terminal's font. This does not affect network access |
 
-如果看到：
+If you see:
 
 ```text
 Executable not found in $PATH: "bun"
 ```
 
-这是 OMP 安装器在**下载插件之前**找不到 Bun，插件自身还没有机会运行或提示。先完成下方 Bun 安装与 PATH 配置，再重试。不要通过反复重新安装插件解决这个前置依赖问题。
+OMP's installer could not find Bun **before downloading the plugin**. The plugin has not run yet and cannot report the missing prerequisite. Install Bun and configure PATH below, then retry; repeatedly reinstalling the plugin will not fix it.
 
-## 方式 A：通过 Homebrew 安装依赖
+## Option A: Install dependencies with Homebrew
 
-已有 `brew` 的机器直接跳到第 3 步。没有 Homebrew 但只想补 Bun，也可以选择后面的方式 B。
+If `brew` already works, skip to step 3. If you only need Bun and do not want Homebrew, use option B instead.
 
-### 1. 安装 Homebrew
+### 1. Install Homebrew
 
-在普通用户账户下执行，不要用 `sudo` 运行 Homebrew 安装器或 `brew install`。安装器会在必要时自行请求提权。
+Run the Homebrew installer and `brew install` as your normal user, not with `sudo`. The installer requests elevation itself when necessary.
 
-Ubuntu／Debian 如果缺少基础工具，先安装：
+On Ubuntu/Debian, install missing basic tools first:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential procps curl file git ca-certificates unzip
 ```
 
-其他 Linux 发行版按其包管理器准备对应依赖；参见 [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux)。macOS 按安装器提示准备开发工具；需要时运行 `xcode-select --install`，完成系统安装窗口后继续。
+On other Linux distributions, install the corresponding packages; see [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux). On macOS, follow the installer's developer-tool instructions; if needed, run `xcode-select --install` and complete the system dialog before continuing.
 
-Linux／macOS 官方 Homebrew 安装命令：
+Official Linux/macOS installation command:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-这会下载并执行官方安装脚本；需要网络可访问 GitHub。具体平台支持范围和安装要求见 [Homebrew 官方安装说明](https://docs.brew.sh/Installation)。
+This downloads and executes the official installer and requires access to GitHub. See the [official installation requirements](https://docs.brew.sh/Installation) for supported platforms and prerequisites.
 
-### 2. 配置 Homebrew 的 PATH
+### 2. Add Homebrew to PATH
 
-**以安装器最后输出的 Next steps 为准。** 常见默认路径如下，只执行与你的系统匹配的一条：
+**Follow the installer's final Next steps.** Common defaults are shown below; run only the command matching your system.
 
-Linux：
+Linux:
 
 ```bash
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 ```
 
-macOS Apple Silicon：
+macOS Apple Silicon:
 
 ```bash
 eval "$(/opt/homebrew/bin/brew shellenv)"
 ```
 
-macOS Intel 的传统默认路径：
+Traditional macOS Intel default:
 
 ```bash
 eval "$(/usr/local/bin/brew shellenv)"
 ```
 
-上面的 `eval` 只影响当前终端。将对应的**同一行原文**添加一次到 shell 启动文件：Bash 通常为 `~/.bashrc`，Zsh 通常为 `~/.zshrc`；macOS 登录 Zsh 按安装器提示使用 `~/.zprofile`。不要把命令展开后的输出粘贴进去，也不要重复添加已有配置。
+The `eval` affects only the current terminal. Add the **same literal command line** once to your shell startup file: usually `~/.bashrc` for Bash or `~/.zshrc` for Zsh. For a macOS login Zsh, follow the installer's `~/.zprofile` instructions. Do not paste the command's expanded output or duplicate an existing entry.
 
-重新打开终端后检查：
+Open a new terminal and check:
 
 ```bash
 brew --version
 ```
 
-### 3. 安装 Bun、Git 和 Node
+### 3. Install Bun, Git, and Node
 
 ```bash
 brew install oven-sh/bun/bun
 ```
 
-如果尚未安装 Git 或 Node.js ≥22：
+If Git or Node.js >=22 is missing:
 
 ```bash
 brew install git node
 ```
 
-确认当前 shell 确实能找到它们：
+Check the same shell that will launch OMP:
 
 ```bash
 command -v bun
@@ -100,122 +100,173 @@ git --version
 node --version
 ```
 
-如果 `brew` 可用但 `bun` 仍找不到，重新加载上一步的 `brew shellenv`，再打开新终端。旧 tmux pane 和已运行的 OMP 进程不会自动获得更新后的环境；重新启动对应终端／OMP。
+If `brew` works but `bun` is still missing, load the appropriate `brew shellenv` command and open a new terminal. Existing tmux panes and running OMP processes do not inherit later environment changes; restart the affected terminal/OMP process.
 
-## 方式 B：直接安装 Bun，不安装 Homebrew
+## Option B: Install Bun directly, without Homebrew
 
-此方式不需要 Homebrew，但仍需要已有 Git，以及运行客户端时所需的 Node.js ≥22。
+This option still requires Git and, for the standalone client, Node.js >=22.
 
-Linux 的官方安装脚本需要 `unzip`。Ubuntu／Debian 可先执行：
+Bun's Linux installer needs `unzip`. On Ubuntu/Debian:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y curl ca-certificates unzip git
 ```
 
-使用 [Bun 官方安装脚本](https://bun.com/docs/installation)：
+Use the [official Bun installer](https://bun.com/docs/installation):
 
 ```bash
 curl -fsSL https://bun.com/install | bash
 ```
 
-如果安装后当前终端仍找不到 Bun：
+If the current terminal still cannot find Bun:
 
 ```bash
 export BUN_INSTALL="$HOME/.bun"
 export PATH="$BUN_INSTALL/bin:$PATH"
 ```
 
-如果安装器尚未写入 shell 配置，将这两行原文添加一次到 `~/.bashrc` 或 `~/.zshrc`，再打开新终端。
+If the installer has not already updated your shell configuration, add those literal lines once to `~/.bashrc` or `~/.zshrc`, then open a new terminal.
 
 ```bash
 bun --version
 ```
 
-也可以在已有 npm 的机器使用 `npm install -g bun`。如果新版 npm 提示 Bun 的安装脚本未获准，按提示仅允许 Bun 的脚本，例如 `npm rebuild --global --allow-scripts=bun bun`，随后再次检查 `bun --version`。不要为了安装这个插件放开所有包的安装脚本。
+On a machine with npm, `npm install -g bun` is another option. If a recent npm blocks Bun's installation script, authorize only Bun's script as instructed, for example `npm rebuild --global --allow-scripts=bun bun`, then check `bun --version` again. Do not enable installation scripts for all packages just to install this plugin.
 
-## 一条命令安装插件
+## Install the plugin
 
-依赖就绪后：
+Once prerequisites are ready:
 
 ```bash
 omp plugin install github:ylang-ylang/omp-lan-rpc
 ```
 
-已安装旧版时，可指定本次版本，避免继续使用旧的 Git 依赖缓存：
+To upgrade an existing installation to this release without reusing an older Git dependency cache:
 
 ```bash
-omp plugin install 'github:ylang-ylang/omp-lan-rpc#v0.2.0'
+omp plugin install 'github:ylang-ylang/omp-lan-rpc#v0.3.0'
 ```
 
-重新启动普通 OMP：
+Start an ordinary OMP session:
 
 ```bash
 omp
 ```
 
-**安装或升级后请完整退出并重新运行 OMP。** 雷达布局在原生状态栏创建前准备；仅 `/reload-plugins` 或 `/lan restart` 不会重建旧版本已经创建的状态栏。`/lan restart` 只重启网络入口。
+**Fully exit and relaunch OMP after installation or upgrades.** The radar layout is prepared before the native TUI is created. Neither `/reload-plugins` nor `/lanrpc restart` rebuilds an already-created status bar; `/lanrpc restart` restarts only the network listener.
 
-在会话内查看或控制入口：
+Use `/lanrpc` to open the English control menu, or run subcommands directly:
 
 ```text
-/lan
-/lan info
-/lan on
-/lan off
-/lan stop
-/lan restart
+/lanrpc
+/lanrpc info
+/lanrpc on
+/lanrpc off
+/lanrpc configure
+/lanrpc start
+/lanrpc stop
+/lanrpc restart
 ```
 
-安装后默认仅监听 `127.0.0.1`，使用随机空闲端口。**安装成功不等于已经向局域网开放。** 每个会话拥有独立的实例 ID 和令牌。
+The default listener uses plain HTTP on **127.0.0.1 only**, with an automatically selected free port. **Installing the plugin does not expose it to the LAN.** Each session owns a separate instance ID and bearer token.
 
-状态栏只显示一个小雷达图标，不再常驻显示完整地址。`/lan` 打开控制菜单；地址、实例 ID 和请求状态在 `/lan info` 中查看。
-雷达使用 Nerd Fonts 的 `md-radar` 字形，颜色遵循 OMP 原生主题；本机与局域网状态在菜单中区分。停止时显示小圆点，错误时显示 `!`。如果雷达显示成方框，请为显示 OMP 的终端选择支持该字形的 [Nerd Font](https://www.nerdfonts.com/)；SSH 场景需要配置本地客户端的终端字体，而不是给远程服务器安装字体。
+The native status bar shows a small radar rather than a permanent endpoint address. `/lanrpc info` shows the address, instance, and request state without displaying the token. All menus, prompts, confirmations, errors, and help are English. The radar uses the Nerd Fonts `md-radar` glyph and OMP's native theme; local/LAN state is distinguished in the menu. Stopped access shows a small circle; an error shows `!`. If the radar looks like a box, select a supporting [Nerd Font](https://www.nerdfonts.com/) in the terminal displaying OMP. With SSH, this is the local client terminal, not the remote server.
 
-- `/lan on`：开启局域网；首次使用会依次询问本机 IP、端口、TLS 证书和私钥路径，并在开启前确认。
-- `/lan off`：关闭局域网，保留本机接口；已配置的局域网 IP 和证书路径不会丢失。
-- `/lan configure`：修改参数并开启局域网。
-- `/lan start`、`/lan stop`、`/lan restart`：启动、停止、重启当前会话的接入服务。
+- `/lanrpc on`: enables LAN access. First use asks for a specific local IP and port. Choose **HTTPS (recommended)** or **HTTP (unencrypted)** explicitly. HTTPS asks for certificate/key paths when needed; HTTP requires a clear plaintext-risk confirmation and does not require certificates.
+- `/lanrpc off`: disables LAN access while keeping local access. The saved LAN IP, protocol, and certificate paths are retained.
+- `/lanrpc configure`: edits the IP, port, protocol, and (for HTTPS) TLS paths, then confirms before enabling LAN access.
+- `/lanrpc start`, `/lanrpc stop`, `/lanrpc restart`: starts, stops, or restarts this session's listener using saved settings.
 
-局域网开关会保存为后续新会话的默认值，并立即重启当前入口；其他已经运行的会话不会被自动修改。重启会更换令牌。待处理请求未结束时，不允许切换会话或重新配置；可以等待完成，或明确执行 `/lan stop`。旧的 `/lan-rpc` 命令已替换为 `/lan`。
+LAN changes save defaults for future sessions and restart only the current listener; other running sessions are unchanged. Restarting rotates the instance and token. Session changes and reconfiguration are refused while remote work is pending: wait for it to finish or explicitly use `/lanrpc stop`. Earlier command names are removed; use only `/lanrpc`.
 
-## 客户端与局域网访问
+## Client and LAN access
 
-默认用户安装路径下，可以这样查看完整操作说明：
+Read complete client help at the default user-install path:
 
 ```bash
 node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs help
 ```
 
-自定义 OMP／XDG 数据目录时，插件安装路径会不同。客户端提供 `list`、`session`、`send`、`request` 和 `config` 命令；`help` 包含完整示例。
+Custom OMP/XDG data roots may use a different plugin path. The client provides `list`, `session`, `send`, `request`, and `config`; `help` includes complete examples. `send` reads message contents from a file, never from command-line arguments.
 
-局域网直连必须同时配置监听 IP、TLS 证书和私钥，例如在 OMP 所在机器执行（替换示例 IP 和证书路径）：
+### HTTPS LAN access (recommended)
+
+On the machine running OMP, replace the example IP and paths:
 
 ```bash
 node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs config \
-  --host 192.0.2.10 --port 0 \
+  --host 192.0.2.10 --port 0 --protocol https \
   --tls-cert /absolute/path/server.crt \
   --tls-key /absolute/path/server.key
 ```
 
-随后重启 OMP 或执行 `/lan restart`；也可以直接在 OMP 内使用 `/lan` 菜单完成配置。证书 SAN 必须匹配客户端使用的 IP／主机名；自签证书的客户端需要 `--ca`。`--port 0` 允许多个会话各自选择空闲端口，固定端口则不能被多个会话同时占用。也可以通过 SSH 隧道访问默认本机监听端口，而不直接开放局域网。
+Then restart OMP or run `/lanrpc restart`. You can also configure it through the `/lanrpc` menu. The certificate SAN must match the client endpoint's IP or hostname; an IP endpoint needs an IP SAN. Clients using a self-signed certificate need `--ca`. If generating a temporary certificate with OpenSSL, include the actual bind IP in its SAN, keep the private key private, and do not commit it.
 
-默认配置及运行目录为 `~/.omp/lan-rpc`，可由 `OMP_LAN_RPC_DIR` 指定。实例元数据和令牌分别位于 `instances/<instance-id>.json` 和同名 `.token` 文件中。只通过 SSH/SCP 等安全通道传递令牌；不要把令牌、TLS 私钥或运行目录提交到仓库。
+```bash
+node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs session \
+  --endpoint https://192.0.2.10:9443 \
+  --token-file /secure/omp.token --ca /secure/server.crt
+```
 
-## 边界与安全
+HTTPS always verifies the certificate and hostname. There is no flag that disables TLS verification. Redirects, including HTTPS-to-HTTP redirects, are never followed.
 
-- 这是消息级 HTTP/JSON 接口，不是 OMP 原生 stdio RPC 的完整网络映射。
-- 令牌允许驱动该 agent 及其已有工具能力；它不是沙箱，只应交给可信调用方。
-- 请求忙时排队；同一代次内按请求 ID 去重。最多 64 个未完成请求、256 条请求记录。
-- 请求记录保存在内存。退出、切换会话或重启接口后，实例和令牌会变更。
-- 响应丢失后，先查询原实例／代次；不能把向新会话重发相同 ID 当成跨重启的恰好一次执行。
-- `/lan stop` 关闭入口，但不会撤销已经发生的工具副作用。
+### Plaintext HTTP LAN access (explicit opt-in)
 
-## 开发
+**HTTP exposes bearer tokens, messages, and responses in plaintext. Anyone able to observe or alter network traffic may steal the token and control the agent's tools.** Choose it only when you accept this risk. HTTPS or an SSH tunnel to the loopback listener is safer.
+
+Explicitly select HTTP on the OMP host:
+
+```bash
+node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs config \
+  --host 192.0.2.10 --port 9443 --protocol http
+```
+
+Restart OMP or run `/lanrpc restart`. HTTP needs no certificate or private key and never reads saved TLS files. Switching protocols or disabling LAN preserves saved certificate paths for later HTTPS use. Existing TLS configurations remain HTTPS; moving from a local host to a LAN host without `--protocol http` defaults to HTTPS rather than silently exposing credentials.
+
+Every client connection to non-loopback HTTP requires **`--allow-http`**, even when selecting a LAN endpoint through local discovery:
+
+```bash
+node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs session \
+  --endpoint http://192.0.2.10:9443 --token-file /secure/omp.token --allow-http
+node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs send \
+  --endpoint http://192.0.2.10:9443 --token-file /secure/omp.token --allow-http \
+  --message-file /absolute/path/prompt.txt --request-id my-request --wait
+node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs request \
+  --endpoint http://192.0.2.10:9443 --token-file /secure/omp.token --allow-http \
+  --request-id my-request --generation GENERATION_FROM_SESSION
+```
+
+Generated recovery/query commands retain `--allow-http`. The flag does not bypass bearer authentication, allow redirects, or disable HTTPS verification. Loopback HTTP works without it.
+
+### Ports, discovery, and private files
+
+`--port 0` lets each session choose a free port; multiple sessions cannot share the same fixed port. An SSH tunnel can reach the default loopback listener without directly exposing a LAN listener.
+
+The default configuration/runtime root is `~/.omp/lan-rpc`; override it with `OMP_LAN_RPC_DIR`. Saved `config.json` includes `protocol` (`http` or `https`). Instance metadata and tokens are stored separately in `instances/<instance-id>.json` and the matching `.token` file. Directories must be private (0700), and files must be owner-readable and inaccessible to other users (0600/0400). Transfer tokens only over a secure channel such as SSH/SCP. Never commit tokens, TLS private keys, or the runtime directory.
+
+`config` updates apply at the next listener startup, not immediately to an already-running session. `--lan off` retains the saved host/protocol/TLS paths; for a saved LAN host it starts a plain loopback listener instead. `list` shows descriptors and whether their PIDs are live, not whether an endpoint is healthy. Stale descriptors are never selected or deleted automatically.
+
+## Security and protocol boundaries
+
+- This is a message-level HTTP/JSON v1 API, not a full network mapping of OMP's native stdio RPC.
+- A token authorizes use of the existing agent and its tools. It is not a sandbox; give it only to trusted callers. Browser-origin requests remain forbidden, including over opted-in HTTP.
+- Busy requests queue, and request IDs are deduplicated within one generation. Limits are 64 unfinished requests and 256 request records.
+- Records are memory-only. Exiting, switching sessions, or restarting the listener changes the instance and token.
+- After a lost response, query the original instance/generation before taking further action. Resending the same ID into a new session is not cross-restart exactly-once execution.
+- `/lanrpc stop` closes access but cannot undo tool side effects that have already happened.
+
+## Development
 
 ```bash
 omp plugin link /absolute/path/to/omp-lan-rpc
 npm test
 ```
 
-已验证宿主 OMP 18.2.6；客户端要求 Node.js ≥22。项目没有第三方运行时 npm 依赖。
+The host API has been verified with OMP 18.2.6. The standalone client requires Node.js >=22. There are no third-party runtime npm dependencies.
+
+## v0.3.0
+
+- English `/lanrpc` menus, dialogs, notifications, help, and documentation; old command aliases removed.
+- Explicit saved HTTP/HTTPS protocol selection, with HTTPS recommended for LAN access and a plaintext-risk confirmation for HTTP.
+- Non-loopback HTTP clients require `--allow-http`; authentication, HTTPS verification, redirect refusal, and request-generation semantics are unchanged.

@@ -472,7 +472,7 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
 
   const config = listenerConfig(await readConfig());
   let tls;
-  if (config.tlsCert !== undefined) {
+  if (config.protocol === "https") {
     const [cert, key] = await Promise.all([
       readFile(config.tlsCert),
       readFile(config.tlsKey),
