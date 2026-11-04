@@ -2,6 +2,8 @@
 
 Local and LAN message access to a running, ordinary OMP session: **anonymous HTTP** or **verified, token-authenticated HTTPS**. Newly started interactive OMP sessions load the installed plugin automatically. No watchdog and no `--mode rpc` conversion are needed.
 
+**Default cross-machine workflow: authenticated, host-verified SSH must already work.** Discover sessions through SSH and access their HTTP API from the remote host. Keep the default loopback listener when using this workflow; no LAN exposure, discovery daemon or fixed RPC port is needed. Direct LAN HTTP/HTTPS remains an explicit alternative, not an automatic fallback when SSH fails.
+
 ## Check dependencies first
 
 **Run these steps on the machine that runs OMP, not on a different development machine.**
@@ -192,6 +194,40 @@ node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs help
 
 Custom OMP/XDG data roots may use a different plugin path. The client provides `list`, `session`, `send`, `request`, and `config`; `help` includes complete examples. `send` reads message contents from a file, never from command-line arguments.
 
+### SSH-first discovery demo: provide only the machine IP
+
+The supported discovery prerequisite is an existing SSH account with non-interactive authentication and a previously verified host key. Configure these outside the plugin, using normal OpenSSH configuration (`User`, `Port`, `IdentityFile`, `ProxyJump`, and an SSH agent as needed). An IP alone does not supply credentials or establish trust. The plugin does not install/configure sshd, enroll keys, accept unknown host keys, or change running OMP sessions.
+
+**Client language is your choice.** `ssh-demo.mjs` is a Node.js example, not a required SDK. A client can be written in Python, Go, Rust, or any language that can run SSH and parse JSON. For example, Python's `subprocess` can invoke the same remote CLI through system OpenSSH, and `json` can parse the returned session metadata. Preserve SSH host verification, endpoint restrictions and instance/generation checks. A Python client reusing the remote `cli.mjs` does not need local Node.js, but still needs Node >=22 on the remote host. The HTTP/JSON RPC protocol itself imposes no client-language requirement.
+
+From this checkout, run:
+
+```bash
+node ssh-demo.mjs 192.168.201.231
+```
+
+From an installation containing the demo:
+
+```bash
+node ~/.omp/plugins/node_modules/omp-lan-rpc/ssh-demo.mjs 192.168.201.231
+```
+
+The demo uses the system `ssh` client with mandatory host-key verification and batch authentication. It executes the already-installed remote `cli.mjs list`, probes PID-live instances with `session`, displays working directories and busy/queue state, and asks you to select a session. A single reachable session is selected automatically. It then reads the selected session again and checks its original instance ID and generation. No RPC port is supplied by the user or scanned.
+
+This is a **read-only access demo**, not a chat client: it only lists descriptors and performs `GET /v1/session`. It never submits messages, restarts OMP, changes listener settings, or replays requests. For scripted use:
+
+```bash
+node ssh-demo.mjs 192.168.201.231 --list
+node ssh-demo.mjs 192.168.201.231 --instance INSTANCE_UUID
+node ssh-demo.mjs --help
+```
+
+All RPC calls run on the SSH host through its existing CLI; only their JSON results cross SSH. This avoids both local port forwarding/listeners and a new remote service. Remote Node >=22 and the plugin must already be installed. The demo adds standard user and Homebrew runtime directories to the remote non-interactive PATH. For a non-default installation, use `--remote-cli /absolute/remote/path/cli.mjs`; configure `OMP_LAN_RPC_DIR` in the remote SSH environment if the session uses a custom runtime root.
+
+Only loopback endpoints and endpoints matching the supplied machine IP are accessed. For a matching LAN HTTP endpoint, the demo explicitly supplies `--allow-http` to the **remote** CLI, never to a direct-network connection from the client. This supports existing LAN listeners without reconfiguration, but **does not remove their anonymous LAN exposure**. Prefer loopback HTTP for SSH-first operation. Other processes on the remote host can still access anonymous loopback HTTP.
+
+HTTPS instances still require the remote CLI's existing token and verified certificate trust. Use `--ca /absolute/remote/path/cert.pem` when needed; the file stays remote. SSH does not disable TLS checks or export tokens. Unavailable/stale instances are not silently substituted; `--list` reports probe failures separately. No direct-network fallback occurs on SSH failure. SSH reachability is a client discovery prerequisite, not a new authentication requirement on the existing HTTP API.
+
 ### HTTPS LAN access (recommended)
 
 On the machine running OMP, replace the example IP:
@@ -268,6 +304,11 @@ npm test
 ```
 
 The host API has been verified with OMP 18.2.6. The standalone client requires Node.js >=22. There are no third-party runtime npm dependencies.
+
+## Unreleased
+
+- Document authenticated, host-verified SSH as the default prerequisite for cross-machine discovery; retain explicit direct LAN access and the existing v1 API unchanged.
+- Include `ssh-demo.mjs`: IP-only, read-only session discovery and selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and instance/generation checks; never fall back to direct networking.
 
 ## v0.4.0
 

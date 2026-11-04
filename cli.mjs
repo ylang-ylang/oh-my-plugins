@@ -107,6 +107,13 @@ USAGE
                                   --generation GEN
 
 CONNECTION
+  Default cross-machine discovery requires already trusted, authenticated SSH.
+  Run the sibling ssh-demo.mjs with only the machine IP for read-only session
+  discovery and selection. It uses the remote CLI, without a discovery daemon
+  or fixed RPC port. Prefer loopback HTTP; SSH does not remove existing LAN
+  HTTP exposure. Explicit direct connections below remain supported and are
+  never used as an automatic fallback when SSH fails.
+
   Local discovery:
     --instance UUID       Select one local runtime descriptor explicitly.
 
