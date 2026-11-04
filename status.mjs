@@ -8,36 +8,33 @@ const ICONS = Object.freeze({ off: '◌', local: RADAR, lan: RADAR, error: '!' }
 const STATUS_KEY = 'lan-rpc';
 
 export class StatusIndicator {
-  constructor(pi) {
-    this.pi = pi;
+  constructor(host) {
+    this.host = host;
+    this.settings = undefined;
     this.active = false;
     this.lastMode = undefined;
     this.owned = new Map();
   }
 
-  prepareAtLoad() {
-    // Native OMP 18.2.6 captures this layout in its TUI constructor, before
-    // session_start. Only prepare settings here; UI actions still wait for a
-    // live context. Installer validation may run without initialized settings.
+  async prepareAtLoad() {
+    // The native TUI captures its layout before session_start. Complete host
+    // adaptation and layout preparation while the extension factory is loading.
     if (!process.stdin.isTTY || !process.stdout.isTTY) return;
-    let settings;
-    try { settings = this.pi.pi.Settings.instance; }
-    catch (error) {
-      if (error.message === 'Settings not initialized. Call Settings.init() first.') return;
-      throw error;
-    }
-    this.applyLayout(settings);
+    this.settings = await this.host.loadSettings();
+    if (this.settings) this.applyLayout(this.settings);
   }
 
-  activate(ctx) {
-    if (ctx.hasUI) this.applyLayout(this.pi.pi.settings);
+  async activate(ctx) {
+    if (!this.host.hasUI(ctx)) return;
+    this.settings ??= await this.host.loadSettings();
+    if (!this.settings) throw new Error('OMP status settings are not initialized');
+    this.applyLayout(this.settings);
   }
 
   applyLayout(settings) {
     if (this.active) return;
-    const { getPreset } = this.pi.pi;
     const name = settings.get('statusLine.preset');
-    const preset = getPreset(name);
+    const preset = settings.getPreset(name);
     const custom = name === 'custom';
     const left = [...(custom ? settings.get('statusLine.leftSegments') : preset.leftSegments)];
     const right = [...(custom ? settings.get('statusLine.rightSegments') : preset.rightSegments)];
@@ -78,11 +75,11 @@ export class StatusIndicator {
   set(ctx, mode) {
     if (!this.active || mode === this.lastMode) return;
     this.lastMode = mode;
-    ctx.ui.setStatus(STATUS_KEY, ICONS[mode]);
+    this.host.setStatus(ctx, STATUS_KEY, ICONS[mode]);
   }
 
   restore() {
-    const { settings } = this.pi.pi;
+    const settings = this.settings;
     for (const [key, { applied }] of [...this.owned].reverse()) {
       // A sibling or operator may have superseded our runtime override.
       if (!isDeepStrictEqual(settings.get(key), applied)) continue;
@@ -92,7 +89,7 @@ export class StatusIndicator {
   }
 
   dispose(ctx) {
-    if (this.active) ctx.ui.setStatus(STATUS_KEY, undefined);
+    if (this.active) this.host.setStatus(ctx, STATUS_KEY, undefined);
     this.restore();
     this.active = false;
     this.lastMode = undefined;

@@ -10,6 +10,6 @@
   "engines": { "node": ">=22" },
   "bin": { "omp-lan-rpc": "./cli.mjs" },
   "omp": { "extensions": ["./extension.mjs"] },
-  "files": ["extension.mjs", "status.mjs", "controller.mjs", "server.mjs", "config.mjs", "tls.mjs", "cli.mjs", "ssh-demo.mjs"],
+  "files": ["extension.mjs", "host/", "status.mjs", "controller.mjs", "server.mjs", "config.mjs", "tls.mjs", "cli.mjs", "ssh-demo.mjs"],
   "scripts": { "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs config.test.mjs tls.test.mjs status.test.mjs" }
 }

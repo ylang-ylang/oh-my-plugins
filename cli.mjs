@@ -91,7 +91,9 @@ INSTALL AND START
   <root>/instances/<instance-id>.json. Only HTTPS has a matching private .token
   file. Directories must be owned by you with mode 0700, files mode 0600/0400.
   Do not put this directory in a shared mount or source repository.
-  Node >=22 is required for the client; the host API was verified on OMP 18.2.6.
+  Node >=22 is required for the client. Host loading, native status and session
+  access have been verified on OMP 18.2.6 and 18.8.4; host API adaptation is
+  isolated under host/ and selected by capability rather than version strings.
 
 USAGE
   node /abs/repo/cli.mjs help

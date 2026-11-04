@@ -303,12 +303,23 @@ omp plugin link /absolute/path/to/omp-lan-rpc
 npm test
 ```
 
-The host API has been verified with OMP 18.2.6. The standalone client requires Node.js >=22. There are no third-party runtime npm dependencies.
+Host loading, `/lanrpc` connection details, inline radar placement, and loopback session access have been verified in real OMP 18.2.6 and 18.8.4 terminals. Other versions are selected by API capability, not assumed compatible from version numbers alone. The standalone client requires Node.js >=22. There are no third-party runtime npm dependencies.
+
+### Host API isolation
+
+`extension.mjs` is only the stable plugin loading entry. All OMP/Pi package imports and host calls live under `host/`:
+
+- `host/index.mjs` owns lifecycle subscriptions, command registration, session access, message delivery, timers, dialogs, keyboard handling, and clipboard output.
+- `host/settings.mjs` adapts host settings and native status presets by capability: legacy string-key Settings methods or newer registry handles, and root-exported or TUI-module presets. It uses host-provided modules rather than installing a second OMP/Pi runtime.
+- `status.mjs` receives an injected host interface and owns layout/indicator behavior; controller, server, TLS, and configuration modules do not import or call OMP/Pi APIs.
+
+Version differences must be handled inside `host/`, not spread into the RPC implementation. Unknown settings capabilities fail explicitly instead of silently omitting the indicator. The async extension factory awaits status preparation **before** OMP constructs the native TUI. Updating the adapter must not move this work back to `session_start`, persist layout overrides, or introduce a separate endpoint footer.
 
 ## Unreleased
 
 - Document authenticated, host-verified SSH as the default prerequisite for cross-machine discovery; retain explicit direct LAN access and the existing v1 API unchanged.
 - Include `ssh-demo.mjs`: IP-only, read-only session discovery and selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and instance/generation checks; never fall back to direct networking.
+- Isolate OMP/Pi integration under `host/` and adapt both legacy settings methods and newer registry handles. Fix extension loading on OMP 18.8.4 (`settings.get is not a function`) while keeping native inline radar placement.
 
 ## v0.4.0
 
