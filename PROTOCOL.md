@@ -24,9 +24,11 @@ JSON timestamps are Unix milliseconds. IDs are case-sensitive strings. `requestI
 
 Errors are HTTP `{ "error": { "code": "machine_readable_code", "message": "English explanation", "details": optional_JSON } }`. No stack, token, credentials, file source path, or provider request is returned. Terminal request/tool errors use the same inner `{code,message,details?}` structure. Unknown body fields, malformed JSON, non-JSON bodies, Origin headers, and redirects are rejected. GET routes accept only their documented query parameters.
 
-Schema dialect: a bounded subset of JSON Schema draft 2020-12, accepting boolean or object schemas and acyclic local JSON-Pointer references. External references, `$id`, anchors/dynamic references, `pattern`, `patternProperties`, and `uniqueItems:true` are rejected explicitly as `invalid_schema`; they are never ignored or rewritten. Regex execution and unbounded reference expansion are excluded because synchronous validation must not block CLI cancellation or HTTP progress. Dereferenced expansion is limited to 2048 schema nodes; JSON depth and byte limits also apply at validation time. `format` is annotation-only. Unknown assertion keywords fail before acceptance. Validation errors identify `instancePath`, `schemaPath`, `keyword`, and `message`. No coercion, default insertion, removal of unknown properties, network schema lookup, or mutation of submitted data occurs.
+Schema dialect: JSON Schema draft 2020-12, accepting boolean or object schemas. Standard assertions such as `pattern`, `patternProperties`, `uniqueItems`, and local recursive references are supported instead of prohibited as a semantic subset. Compilation and evaluation run outside the OMP/HTTP event loop in killable, resource-limited Node processes. `$id`, anchors and dynamic references follow the validator's draft-2020-12 semantics for resources included in the schema document; unresolved external references are rejected, with no network fetch. `$async` and executable extension keywords are not accepted. `format` remains annotation-only. Validation errors identify `instancePath`, `schemaPath`, `keyword`, and `message`. No coercion, default insertion, removal of properties, or mutation of caller data occurs in LAN RPC validation.
 
-Validation also rejects schema-node × value-node work estimates above 2048² with `schema_validation`/`complexity`, and reports the first concrete validation error rather than accumulating unbounded errors. This is a conservative complexity guard, not a promised CPU-time deadline. Local reference targets are subject to the same keyword policy even when referenced from an annotation value.
+Each isolated validation operation has a default 2000 ms wall-clock budget, including queue time. At most two workers run concurrently, with at most 32 queued operations; each Node worker has a 64 MiB V8 heap limit (not an OS total-memory guarantee). Timeout/abort terminates the worker; the event loop remains available for CLI input, request cancellation and HTTP queries. Size/depth limits still apply, but regex and unique-item semantics are not silently disabled. `validation_timeout`, `validation_capacity`, `validation_aborted`, and `validation_worker_failed` are explicit errors. Accepted request identity, terminal state and callback lease are rechecked after every asynchronous validation before committing any data.
+
+Current OMP hosts synchronously inspect native tool parameter schemas. LAN RPC therefore exposes a safe structural parameter projection and includes the complete original schema in the tool description; only the isolated validator is authoritative for complex constraints. The schema supplied by the caller is not rewritten for validation. Existing host argument normalization remains host behavior, not an RPC business transformation. Native-mode message/event payloads do not pass through result-schema validation.
 
 ## Session discovery
 
@@ -190,7 +192,7 @@ Sequences increase within a request. Types: `request.state` with `{state,error?}
 
 404: `not_found`, `request_not_found`, `tool_call_not_found`, `artifact_not_found`.
 
-409: `instance_mismatch`, `generation_mismatch`, `request_conflict`, `request_terminal`, `result_conflict`, `tools_pending`, `tool_claimed`, `lease_mismatch`, `lease_expired`, `tool_result_conflict`, `artifact_conflict`.
+409: `instance_mismatch`, `generation_mismatch`, `request_conflict`, `request_terminal`, `result_conflict`, `tools_pending`, `tool_claimed`, `lease_mismatch`, `lease_expired`, `tool_result_conflict`, `artifact_conflict`, `validation_aborted`.
 
 410: `protocol_upgraded`, `artifact_expired`, `event_history_expired`.
 
@@ -198,9 +200,9 @@ Sequences increase within a request. Types: `request.state` with `{state,error?}
 
 422: `schema_validation` (with validation details).
 
-429: `queue_full`, `request_capacity`, `tool_capacity`, `artifact_capacity`.
+429: `queue_full`, `request_capacity`, `tool_capacity`, `artifact_capacity`, `validation_capacity`.
 
-501: `host_unsupported`. 503: `session_closed`, `host_drain_timeout`. Existing transport errors retain 401 `unauthorized`, 403 `origin_not_allowed`, 405 `method_not_allowed`, 408 timeout, 415 content-type rejection, and 500 `internal_error`.
+501: `host_unsupported`. 503: `session_closed`, `host_drain_timeout`, `validation_timeout`, `validation_worker_failed`. Existing transport errors retain 401 `unauthorized`, 403 `origin_not_allowed`, 405 `method_not_allowed`, 408 timeout, 415 content-type rejection, and 500 `internal_error`.
 
 Terminal request reasons additionally include `result_missing`, `request_timeout`, `cli_takeover`, `host_cancelled`, `session_changed`, `endpoint_closed`, `client_cancelled`, `host_failed`, and `value_too_large`. Malformed/unserializable executor output is a host failure, not a caller request validation error. Terminal tool reasons include `tool_timeout` and `request_terminated`. Clients branch on codes/states, never English message wording.
 

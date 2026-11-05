@@ -32,6 +32,8 @@
     "controller.mjs",
     "protocol.mjs",
     "schema.mjs",
+    "schema-runtime.mjs",
+    "schema-worker.mjs",
     "artifacts.mjs",
     "sdk.mjs",
     "examples/",

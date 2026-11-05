@@ -70,7 +70,7 @@ class FakeController {
     };
   }
 
-  submit(body) {
+  async submit(body) {
     this.guard(body);
     this.remember('submit', body);
     if (body.requestId === 'schema_failure') {
@@ -143,7 +143,7 @@ class FakeController {
     };
   }
 
-  toolResult(identity) {
+  async toolResult(identity) {
     this.guard(identity);
     this.remember('toolResult', identity);
     return { ...this.toolRecord(identity, 'completed'), result: identity.outcome.result };

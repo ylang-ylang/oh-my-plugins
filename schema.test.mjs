@@ -30,7 +30,7 @@ test('validateJson rejects custom prototypes, accessors, cycles, and non-JSON nu
     enumerable: true,
     get() {
       getterCalled = true;
-      return 'secret';
+      return 'no';
     },
   });
   assert.throws(() => validateJson(accessor), error => (
@@ -66,266 +66,244 @@ test('canonicalJSON sorts every object and normalizes equivalent JSON numbers', 
   assert.equal(canonicalJSON(first), canonicalJSON(second));
 });
 
-test('compileSchema supports bounded local references and precise validation paths', () => {
-  const validate = compileSchema({
+test('compileSchema supports pattern, patternProperties, and structural uniqueItems', async () => {
+  const patterned = await compileSchema({
     type: 'object',
+    properties: { slug: { type: 'string', pattern: '^[a-z]+$' } },
+    patternProperties: { '^x_': { type: 'integer' } },
+    required: ['slug'],
+    additionalProperties: false,
+  });
+  const matching = { slug: 'valid', x_count: 2 };
+  assert.equal(await patterned(matching), matching);
+  await assert.rejects(patterned({ slug: 'Not-valid' }), throwsCode('schema_validation'));
+  await assert.rejects(patterned({ slug: 'valid', x_count: '2' }), throwsCode('schema_validation'));
+
+  const unique = await compileSchema({ type: 'array', uniqueItems: true });
+  await assert.rejects(unique([{ id: 1 }, { id: 1 }]), error => (
+    error?.status === 422
+      && error?.code === 'schema_validation'
+      && error.details?.errors[0]?.keyword === 'uniqueItems'
+  ));
+  const distinct = [{ id: 1 }, { id: 2 }];
+  assert.equal(await unique(distinct), distinct);
+});
+
+test('compileSchema accepts valid schemas without Ajv strict-lint subset restrictions', async () => {
+  const propertiesWithoutType = await compileSchema({
+    properties: { x: { type: 'string' } },
+  });
+  assert.deepEqual(await propertiesWithoutType({ x: 'value' }), { x: 'value' });
+
+  const overlappingPatterns = await compileSchema({
+    type: 'object',
+    properties: { x: { type: 'string' } },
+    patternProperties: { '^x$': { minLength: 2 } },
+  });
+  assert.deepEqual(await overlappingPatterns({ x: 'ok' }), { x: 'ok' });
+  await assert.rejects(overlappingPatterns({ x: 'x' }), throwsCode('schema_validation'));
+});
+
+test('compileSchema supports recursive local references, IDs, anchors, and dynamic references', async () => {
+  const recursive = await compileSchema({
+    $id: 'https://schemas.example/tree',
     $defs: {
-      item: { type: 'string', minLength: 2 },
-    },
-    properties: {
-      items: {
-        type: 'array',
-        items: { $ref: '#/$defs/item' },
+      node: {
+        type: 'object',
+        properties: {
+          value: { type: 'string' },
+          children: { type: 'array', items: { $ref: '#/$defs/node' } },
+        },
+        required: ['value'],
+        additionalProperties: false,
       },
     },
-    required: ['items'],
-    additionalProperties: false,
-  }, 'result');
-
-  const valid = { items: ['ok'] };
-  assert.equal(validate(valid), valid);
-  assert.throws(() => validate({ items: ['x'] }), error => {
+    $ref: '#/$defs/node',
+  }, 'tree');
+  const tree = { value: 'root', children: [{ value: 'leaf' }] };
+  assert.equal(await recursive(tree), tree);
+  await assert.rejects(recursive({ value: 'root', children: [{ value: 1 }] }), error => {
     assert.equal(error.status, 422);
     assert.equal(error.code, 'schema_validation');
-    const detail = error.details.errors.find(item => item.instancePath === '/items/0');
-    assert.deepEqual(Object.keys(detail).sort(), ['instancePath', 'keyword', 'message', 'schemaPath']);
-    assert.equal(detail.schemaPath, '#/$defs/item/minLength');
-    assert.equal(detail.keyword, 'minLength');
+    assert.equal(error.details.errors[0].instancePath, '/children/0/value');
     return true;
   });
-});
 
-test('compileSchema rejects recursive and combinatorially expanded local references', () => {
-  assert.throws(
-    () => compileSchema({
-      $defs: {
-        node: {
-          type: 'object',
-          properties: { next: { $ref: '#/$defs/node' } },
+  const anchored = await compileSchema({
+    $id: 'https://schemas.example/anchored-tree',
+    $defs: {
+      node: {
+        $anchor: 'node',
+        type: 'object',
+        properties: {
+          value: { type: 'integer' },
+          children: { type: 'array', items: { $ref: '#node' } },
         },
+        required: ['value'],
+        additionalProperties: false,
       },
-      $ref: '#/$defs/node',
-    }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.keyword === '$ref'
-      && error.details.errors[0].message.includes('recursive'),
-  );
-
-  const $defs = { leaf: { type: 'null' } };
-  let previous = 'leaf';
-  for (let depth = 0; depth < 12; depth += 1) {
-    const name = `level${depth}`;
-    $defs[name] = {
-      anyOf: [
-        { $ref: `#/$defs/${previous}` },
-        { $ref: `#/$defs/${previous}` },
-      ],
-    };
-    previous = name;
-  }
-  assert.throws(
-    () => compileSchema({ $defs, $ref: `#/$defs/${previous}` }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.keyword === '$ref'
-      && error.details.errors[0].message.includes('expanded validation graph'),
-  );
-});
-
-test('compileSchema supports only unambiguous local JSON Pointer reference semantics', () => {
-  for (const schema of [
-    { $id: 'caller-schema', type: 'string' },
-    { $anchor: 'item', type: 'string' },
-    { $dynamicAnchor: 'item', type: 'string' },
-    { $dynamicRef: '#item' },
-    { $ref: '#item' },
-  ]) {
-    assert.throws(() => compileSchema(schema), throwsCode('invalid_schema'));
-  }
-});
-
-test('compileSchema applies safety policy to schemas reached through literal JSON locations', () => {
-  const hazardousTargets = [
-    { type: 'string', pattern: '^(a+)+$' },
-    { type: 'object', patternProperties: { '^(a+)+$': true } },
-    { type: 'array', uniqueItems: true },
-    { $dynamicRef: '#item' },
-  ];
-  for (const target of hazardousTargets) {
-    assert.throws(
-      () => compileSchema({ $ref: '#/default', default: target }),
-      throwsCode('invalid_schema'),
-    );
-  }
-
-  assert.doesNotThrow(() => compileSchema({
-    default: { pattern: 'literal annotation data is not executed' },
-  }));
-});
-
-test('compileSchema caps aggregate schema-by-data evaluation work before Ajv runs', () => {
-  const validate = compileSchema({
-    type: 'array',
-    items: {
-      allOf: Array.from({ length: 500 }, () => ({ const: 0 })),
     },
-  });
-  assert.throws(
-    () => validate(Array.from({ length: 5_000 }, () => 0)),
-    error => error?.status === 422
-      && error?.code === 'schema_validation'
-      && error.details?.errors[0]?.keyword === 'complexity',
+    $ref: '#node',
+  }, 'anchoredTree');
+  assert.deepEqual(
+    await anchored({ value: 1, children: [{ value: 2 }] }),
+    { value: 1, children: [{ value: 2 }] },
   );
-});
-
-test('compileSchema rejects quadratic uniqueItems and validates JSON safety before schema evaluation', () => {
-  assert.throws(
-    () => compileSchema({ type: 'array', uniqueItems: true }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.instancePath === '/uniqueItems',
-  );
-  const allowDuplicates = compileSchema({ type: 'array', uniqueItems: false });
-  const item = { id: 1 };
-  assert.deepEqual(allowDuplicates([item, item]), [item, item]);
-
-  const validate = compileSchema(true);
-  const cyclic = {};
-  cyclic.self = cyclic;
-  assert.throws(
-    () => validate(cyclic),
-    error => error?.status === 422
-      && error?.code === 'schema_validation'
-      && error.details?.errors[0]?.instancePath === '/self'
-      && error.details.errors[0].keyword === 'json',
+  await assert.rejects(
+    anchored({ value: 1, children: [{ value: 'bad' }] }),
+    error => error?.code === 'schema_validation'
+      && error.details?.errors[0]?.instancePath === '/children/0/value',
   );
 
-  const deep = {};
-  let cursor = deep;
-  for (let depth = 0; depth < 32; depth += 1) {
-    cursor.child = {};
-    cursor = cursor.child;
-  }
-  assert.throws(
-    () => validate(deep),
-    error => error?.status === 422
-      && error?.code === 'schema_validation'
-      && error.details?.errors[0]?.keyword === 'json',
-  );
-});
-
-test('compileSchema rejects external references without mistaking literal data for schemas', () => {
-  assert.throws(
-    () => compileSchema({ $ref: 'https://example.invalid/schema' }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.instancePath === '/$ref'
-      && error.details.errors[0].keyword === '$ref',
-  );
-
-  const literal = { $ref: 'https://example.invalid/literal-data' };
-  const validateLiteral = compileSchema({ const: literal });
-  assert.equal(validateLiteral(literal), literal);
-});
-
-test('compileSchema rejects every executable regular-expression keyword before Ajv compilation', () => {
-  assert.throws(
-    () => compileSchema({
-      type: 'object',
-      $defs: {
-        unsafe: { type: 'string', pattern: '^(a+)+$' },
-      },
-      properties: { value: { $ref: '#/$defs/unsafe' } },
-    }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.instancePath === '/$defs/unsafe/pattern'
-      && error.details.errors[0].keyword === 'pattern',
-  );
-
-  assert.throws(
-    () => compileSchema({ type: 'object', patternProperties: {} }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.instancePath === '/patternProperties'
-      && error.details.errors[0].keyword === 'patternProperties',
-  );
-
-  const literal = { pattern: '^(a+)+$', patternProperties: { '^(a+)+$': true } };
-  const validateLiteral = compileSchema({ const: literal });
-  assert.equal(validateLiteral(literal), literal);
-});
-
-test('compileSchema reports invalid schema paths and rejects unknown strict keywords', () => {
-  assert.throws(() => compileSchema({
+  const dynamic = await compileSchema({
+    $dynamicAnchor: 'node',
     type: 'object',
     properties: {
-      value: { type: 'string', unknownAssertion: true },
+      value: { type: 'integer' },
+      next: { $dynamicRef: '#node' },
     },
-  }), error => error?.code === 'invalid_schema'
-    && error.details?.errors[0]?.instancePath === '/properties/value/unknownAssertion');
+    required: ['value'],
+    additionalProperties: false,
+  });
+  assert.deepEqual(await dynamic({ value: 1, next: { value: 2 } }), { value: 1, next: { value: 2 } });
+  await assert.rejects(dynamic({ value: 1, next: { value: 'bad' } }), throwsCode('schema_validation'));
+});
 
-  assert.throws(() => compileSchema({ type: 'not-a-json-type' }), error => (
-    error?.code === 'invalid_schema'
-      && error.details?.errors.some(detail => detail.instancePath === '/type')
-  ));
-  assert.throws(
-    () => compileSchema({ $async: true, type: 'string' }),
+test('compileSchema rejects invalid regex and unresolved external references without fetching', async () => {
+  await assert.rejects(
+    compileSchema({ type: 'string', pattern: '[' }),
     error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.instancePath === '/$async',
+      && error.details?.errors[0]?.keyword === 'pattern',
   );
-  assert.throws(
-    () => compileSchema({ type: 'string', nullable: true }),
-    error => error?.code === 'invalid_schema'
-      && error.details?.errors[0]?.instancePath === '/nullable',
+  await assert.rejects(
+    compileSchema({ $ref: 'https://example.invalid/unavailable-schema' }),
+    error => error?.status === 400
+      && error?.code === 'invalid_schema'
+      && error.details?.errors[0]?.keyword === '$ref',
   );
 });
 
-test('compileSchema treats format as annotation and bounds total schema nodes', () => {
-  const validate = compileSchema({ type: 'string', format: 'caller-private-format' });
-  assert.equal(validate('uninterpreted'), 'uninterpreted');
+test('compileSchema rejects executable async schemas but not literal annotation data', async () => {
+  await assert.rejects(
+    compileSchema({
+      type: 'object',
+      properties: { value: { $async: true, type: 'string' } },
+    }),
+    error => error?.code === 'invalid_schema'
+      && error.details?.errors[0]?.instancePath === '/properties/value/$async',
+  );
+  const literal = { $async: true, pattern: 'literal data' };
+  const validateLiteral = await compileSchema({ const: literal });
+  assert.equal(await validateLiteral(literal), literal);
+});
 
-  assert.throws(
-    () => compileSchema({ enum: Array.from({ length: 2_050 }, () => 0) }),
+test('compileSchema is strict, treats format as annotation, and bounds schema JSON', async () => {
+  await assert.rejects(
+    compileSchema({ type: 'object', unknownAssertion: true }),
+    error => error?.code === 'invalid_schema'
+      && error.details?.errors[0]?.keyword === 'unknownKeyword',
+  );
+  await assert.rejects(compileSchema({ type: 'not-a-json-type' }), throwsCode('invalid_schema'));
+
+  const annotated = await compileSchema({ type: 'string', format: 'caller-private-format' });
+  assert.equal(await annotated('uninterpreted'), 'uninterpreted');
+  await assert.rejects(
+    compileSchema({ enum: Array.from({ length: 2_050 }, () => 0) }),
     throwsCode('invalid_schema'),
   );
 });
 
-test('prepareRequest enforces response mode and result schema pairing', () => {
-  assert.throws(
-    () => prepareRequest(nativeRequest({ resultSchema: true })),
+test('validators reject unsafe JSON before isolated schema evaluation', async () => {
+  const validate = await compileSchema(true);
+  const cyclic = {};
+  cyclic.self = cyclic;
+  await assert.rejects(validate(cyclic), error => (
+    error?.status === 422
+      && error?.code === 'schema_validation'
+      && error.details?.errors[0]?.instancePath === '/self'
+      && error.details.errors[0].keyword === 'json'
+  ));
+});
+
+test('catastrophic regex times out in a killable worker while the main timer progresses', async () => {
+  const validate = await compileSchema(
+    { type: 'string', pattern: '^(a+)+$' },
+    'dangerous',
+    { timeoutMs: 500 },
+  );
+  let timerProgressed = false;
+  const timer = setTimeout(() => {
+    timerProgressed = true;
+  }, 25);
+  await assert.rejects(
+    validate(`${'a'.repeat(30_000)}!`),
+    error => error?.status === 503 && error?.code === 'validation_timeout',
+  );
+  clearTimeout(timer);
+  assert.equal(timerProgressed, true);
+});
+
+test('abort and capacity failures kill active work, remove queued jobs, and release capacity', async () => {
+  const validate = await compileSchema(
+    { type: 'string', pattern: '^(a+)+$' },
+    'queued',
+    { timeoutMs: 1_000 },
+  );
+  const controller = new AbortController();
+  const hostile = `${'a'.repeat(30_000)}!`;
+  const operations = Array.from({ length: 35 }, () => validate(hostile, { signal: controller.signal }));
+  await assert.rejects(
+    operations.at(-1),
+    error => error?.status === 429 && error?.code === 'validation_capacity',
+  );
+  controller.abort();
+  const results = await Promise.allSettled(operations.slice(0, -1));
+  assert.equal(results.every(result => (
+    result.status === 'rejected' && result.reason?.code === 'validation_aborted'
+  )), true);
+  assert.equal(await validate('aaaa'), 'aaaa');
+});
+
+test('prepareRequest enforces response mode and preserves native raw mode', async () => {
+  await assert.rejects(
+    prepareRequest(nativeRequest({ resultSchema: true })),
     throwsCode('invalid_request'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ responseMode: 'structured' })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ responseMode: 'structured' })),
     throwsCode('invalid_request'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ responseMode: null })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ responseMode: null })),
     throwsCode('invalid_request'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ timeoutMs: null })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ timeoutMs: null })),
     throwsCode('invalid_request'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ tools: null })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ tools: null })),
     throwsCode('invalid_tool'),
   );
 
-  const native = prepareRequest(nativeRequest());
+  const native = await prepareRequest(nativeRequest());
   assert.equal(native.request.responseMode, 'native');
   assert.equal(native.resultValidator, undefined);
   assert.equal(Object.hasOwn(native.request, 'resultSchema'), false);
 
-  const structured = prepareRequest(nativeRequest({ responseMode: 'structured', resultSchema: false }));
+  const structured = await prepareRequest(nativeRequest({ responseMode: 'structured', resultSchema: false }));
   assert.equal(structured.request.responseMode, 'structured');
-  assert.throws(() => structured.resultValidator(null), throwsCode('schema_validation'));
+  await assert.rejects(structured.resultValidator(null), throwsCode('schema_validation'));
 });
 
-test('prepareRequest enforces message and complete body byte limits', () => {
-  assert.doesNotThrow(() => prepareRequest(nativeRequest({ message: 'x'.repeat(48 * 1024) })));
-  assert.throws(
-    () => prepareRequest(nativeRequest({ message: 'x'.repeat((48 * 1024) + 1) })),
+test('prepareRequest enforces message and complete body byte limits', async () => {
+  await assert.doesNotReject(prepareRequest(nativeRequest({ message: 'x'.repeat(48 * 1024) })));
+  await assert.rejects(
+    prepareRequest(nativeRequest({ message: 'x'.repeat((48 * 1024) + 1) })),
     throwsCode('invalid_message'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({
+  await assert.rejects(
+    prepareRequest(nativeRequest({
       responseMode: 'structured',
       resultSchema: { description: 'x'.repeat(64 * 1024) },
     })),
@@ -333,14 +311,14 @@ test('prepareRequest enforces message and complete body byte limits', () => {
   );
 });
 
-test('prepareRequest rejects unknown fields and normalizes explicit defaults for deduplication', () => {
-  assert.throws(
-    () => prepareRequest(nativeRequest({ unexpected: true })),
+test('prepareRequest rejects unknown fields and normalizes explicit defaults', async () => {
+  await assert.rejects(
+    prepareRequest(nativeRequest({ unexpected: true })),
     error => error?.code === 'invalid_request' && error.details?.field === 'unexpected',
   );
 
-  const omitted = prepareRequest(nativeRequest()).request;
-  const explicit = prepareRequest({
+  const omitted = (await prepareRequest(nativeRequest())).request;
+  const explicit = (await prepareRequest({
     message: 'Do the work.',
     requestId: 'request_1',
     generation: 7,
@@ -349,14 +327,14 @@ test('prepareRequest rejects unknown fields and normalizes explicit defaults for
     tools: [],
     timeoutMs: 300_000,
     toolTimeoutMs: 60_000,
-  }).request;
+  })).request;
   assert.equal(canonicalJSON(omitted), canonicalJSON(explicit));
 
-  const capped = prepareRequest(nativeRequest({ timeoutMs: 2_000 })).request;
+  const capped = (await prepareRequest(nativeRequest({ timeoutMs: 2_000 }))).request;
   assert.equal(capped.toolTimeoutMs, 2_000);
 });
 
-test('prepareRequest compiles caller tool schemas and isolates the normalized clone', () => {
+test('prepareRequest compiles caller tool schemas and isolates the normalized clone', async () => {
   const body = nativeRequest({
     tools: [{
       name: 'lookup_item',
@@ -370,48 +348,57 @@ test('prepareRequest compiles caller tool schemas and isolates the normalized cl
       },
       resultSchema: {
         type: 'object',
-        properties: { title: { type: 'string' } },
+        properties: { title: { type: 'string', pattern: '^.+$' } },
         required: ['title'],
         additionalProperties: false,
       },
     }],
   });
-  const prepared = prepareRequest(body);
+  const prepared = await prepareRequest(body);
   body.tools[0].inputSchema.properties.id = true;
 
   assert.notEqual(prepared.request.tools[0].inputSchema, body.tools[0].inputSchema);
-  assert.throws(
-    () => prepared.toolValidators.get('lookup_item').input({ id: 0 }),
+  await assert.rejects(
+    prepared.toolValidators.get('lookup_item').input({ id: 0 }),
     error => error?.code === 'schema_validation'
       && error.details?.errors.some(detail => detail.instancePath === '/id'),
   );
   assert.deepEqual(
-    prepared.toolValidators.get('lookup_item').result({ title: 'Found' }),
+    await prepared.toolValidators.get('lookup_item').result({ title: 'Found' }),
     { title: 'Found' },
   );
 });
 
-test('prepareRequest rejects tool name collisions, reserved prefixes, and non-object inputs', () => {
+test('prepareRequest rejects tool name collisions, reserved prefixes, and non-object inputs', async () => {
   const tool = {
     name: 'lookup_item',
     description: 'Look up an item.',
     inputSchema: { type: 'object' },
     resultSchema: true,
   };
-  assert.throws(
-    () => prepareRequest(nativeRequest({ tools: [tool] }), { reservedToolNames: ['lookup_item'] }),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ tools: [tool] }), { reservedToolNames: ['lookup_item'] }),
     throwsCode('invalid_tool'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ tools: [{ ...tool, name: 'rpc_hidden' }] })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ tools: [{ ...tool, name: 'rpc_hidden' }] })),
     throwsCode('invalid_tool'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ tools: [tool, tool] })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ tools: [tool, tool] })),
     throwsCode('invalid_tool'),
   );
-  assert.throws(
-    () => prepareRequest(nativeRequest({ tools: [{ ...tool, inputSchema: { type: 'string' } }] })),
+  await assert.rejects(
+    prepareRequest(nativeRequest({ tools: [{ ...tool, inputSchema: { type: 'string' } }] })),
     throwsCode('invalid_tool'),
+  );
+});
+
+test('prepareRequest forwards cancellation to isolated schema compilation', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    prepareRequest(nativeRequest({ responseMode: 'structured', resultSchema: true }), { signal: controller.signal }),
+    error => error?.status === 409 && error?.code === 'validation_aborted',
   );
 });

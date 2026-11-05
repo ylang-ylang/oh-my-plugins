@@ -154,6 +154,8 @@ export class RequestController {
     this.active = null;
     this.closed = false;
     this.closePromise = undefined;
+    this._admissionEpoch = 0;
+    this._admissionControllers = new Set();
   }
 
   session() {
@@ -174,14 +176,42 @@ export class RequestController {
     };
   }
 
-  submit(body) {
+  async submit(body, { signal } = {}) {
     this.#checkIdentity(body);
     validateId(body?.requestId);
+    validateJson(body, { maxBytes: LIMITS.requestBytes, maxDepth: LIMITS.jsonDepth });
+    const input = structuredClone(body);
     this.#sweep();
     if (this.closed) throw failure(503, 'session_closed', 'This session endpoint is closed');
     if (!this.supported) throw failure(501, 'host_unsupported', 'This host cannot isolate RPC execution from the interactive session');
 
-    const prepared = prepareRequest(body, { reservedToolNames: this.reservedToolNames });
+    const admissionEpoch = this._admissionEpoch;
+    const admissionController = new AbortController();
+    const validationSignal = signal === undefined
+      ? admissionController.signal
+      : AbortSignal.any([admissionController.signal, signal]);
+    this._admissionControllers.add(admissionController);
+    let prepared;
+    try {
+      prepared = await prepareRequest(input, {
+        reservedToolNames: this.reservedToolNames,
+        signal: validationSignal,
+      });
+    } finally {
+      this._admissionControllers.delete(admissionController);
+    }
+    if (validationSignal.aborted) {
+      throw failure(409, 'validation_aborted', 'Request admission was aborted before validation completed');
+    }
+
+    this.#checkIdentity(input);
+    this.#sweep();
+    if (this.closed) throw failure(503, 'session_closed', 'This session endpoint is closed');
+    if (!this.supported) throw failure(501, 'host_unsupported', 'This host cannot isolate RPC execution from the interactive session');
+    if (admissionEpoch !== this._admissionEpoch) {
+      throw failure(409, 'validation_aborted', 'Request admission was interrupted before validation completed');
+    }
+
     const requestKey = canonicalJSON(prepared.request);
     const existing = this.requests.get(prepared.request.requestId);
     if (existing) {
@@ -297,7 +327,7 @@ export class RequestController {
     return this.#toolSnapshot(call);
   }
 
-  toolResult(identity) {
+  async toolResult(identity, { signal } = {}) {
     const record = this.#getRequest(identity);
     const call = this.#getToolCall(record, identity?.toolCallId);
     if (typeof identity?.leaseId !== 'string') throw failure(400, 'invalid_outcome', 'leaseId is required');
@@ -305,30 +335,68 @@ export class RequestController {
     if (identity.outcome.status === 'completed') {
       validateJson(identity.outcome.result, { maxBytes: LIMITS.resultBytes, maxDepth: LIMITS.jsonDepth });
     }
-    const key = outcomeKey(identity.outcome);
+    const leaseId = identity.leaseId;
+    const submittedIdentity = {
+      instanceId: identity.instanceId,
+      generation: identity.generation,
+      requestId: identity.requestId,
+      toolCallId: identity.toolCallId,
+    };
+    const outcome = structuredClone(identity.outcome);
+    const key = outcomeKey(outcome);
 
     if (TOOL_TERMINAL_STATES.has(call.state)) {
-      if (call._acceptedLeaseId === identity.leaseId) {
+      if (call._acceptedLeaseId === leaseId) {
         if (call._outcomeKey === key) return this.#toolSnapshot(call);
         throw failure(409, 'tool_result_conflict', 'This lease already submitted a different outcome');
       }
-      if (call._expiredLeases?.has(identity.leaseId)) throw failure(409, 'lease_expired', 'The supplied lease has expired');
+      if (call._expiredLeases?.has(leaseId)) throw failure(409, 'lease_expired', 'The supplied lease has expired');
       throw failure(409, 'lease_mismatch', 'The supplied lease does not own this tool call');
     }
     if (TERMINAL_STATES.has(record.state)) throw failure(409, 'request_terminal', 'The request is already terminal');
 
-    const at = this.now();
+    let at = this.now();
     this.#sweepTool(record, call, at);
     if (call.state !== 'claimed') {
-      if (call._expiredLeases?.has(identity.leaseId)) throw failure(409, 'lease_expired', 'The supplied lease has expired');
+      if (call._expiredLeases?.has(leaseId)) throw failure(409, 'lease_expired', 'The supplied lease has expired');
       throw failure(409, 'lease_mismatch', 'The supplied lease does not own this tool call');
     }
-    if (call.leaseId !== identity.leaseId) throw failure(409, 'lease_mismatch', 'The supplied lease does not own this tool call');
-    if (identity.outcome.status === 'completed') call._validator.result(identity.outcome.result);
+    if (call.leaseId !== leaseId) throw failure(409, 'lease_mismatch', 'The supplied lease does not own this tool call');
 
-    call._acceptedLeaseId = identity.leaseId;
+    if (outcome.status === 'completed') {
+      const validationSignal = signal === undefined
+        ? record._abortController.signal
+        : AbortSignal.any([record._abortController.signal, signal]);
+      try {
+        await call._validator.result(outcome.result, { signal: validationSignal });
+      } catch (error) {
+        if (call._acceptedLeaseId === leaseId) {
+          if (call._outcomeKey === key) return this.#toolSnapshot(call);
+          throw failure(409, 'tool_result_conflict', 'This lease already submitted a different outcome');
+        }
+        throw error;
+      }
+    }
+
+    this.#checkIdentity(submittedIdentity);
+    this.#sweep();
+    if (TOOL_TERMINAL_STATES.has(call.state)) {
+      if (call._acceptedLeaseId === leaseId) {
+        if (call._outcomeKey === key) return this.#toolSnapshot(call);
+        throw failure(409, 'tool_result_conflict', 'This lease already submitted a different outcome');
+      }
+      if (call._expiredLeases?.has(leaseId)) throw failure(409, 'lease_expired', 'The supplied lease has expired');
+      throw failure(409, 'lease_mismatch', 'The supplied lease does not own this tool call');
+    }
+    if (TERMINAL_STATES.has(record.state)) throw failure(409, 'request_terminal', 'The request is already terminal');
+    if (call.state !== 'claimed' || call.leaseId !== leaseId) {
+      if (call._expiredLeases?.has(leaseId)) throw failure(409, 'lease_expired', 'The supplied lease has expired');
+      throw failure(409, 'lease_mismatch', 'The supplied lease does not own this tool call');
+    }
+
+    at = this.now();
+    call._acceptedLeaseId = leaseId;
     call._outcomeKey = key;
-    const outcome = structuredClone(identity.outcome);
     if (outcome.status === 'completed') {
       this.#settleTool(record, call, 'completed', outcome, at);
     } else {
@@ -427,6 +495,10 @@ export class RequestController {
 
   interrupt(code = 'cli_takeover', message) {
     const description = message ?? defaultInterruptMessage(code);
+    this._admissionEpoch += 1;
+    for (const controller of this._admissionControllers) {
+      controller.abort(failure(409, 'validation_aborted', description));
+    }
     this.queue.length = 0;
     for (const record of this.requests.values()) {
       if (!TERMINAL_STATES.has(record.state)) {
@@ -631,12 +703,13 @@ export class RequestController {
     delete call._resolve;
   }
 
-  #submitResult(record, value) {
+  async #submitResult(record, value) {
     if (record.responseMode !== 'structured') {
       throw failure(400, 'invalid_request', 'Native response mode does not expose rpc_result');
     }
     validateJson(value, { maxBytes: LIMITS.resultBytes, maxDepth: LIMITS.jsonDepth });
-    const key = canonicalJSON(value);
+    const result = structuredClone(value);
+    const key = canonicalJSON(result);
     if (record.state === 'completed' && record._resultKey !== undefined) {
       if (record._resultKey === key) return { accepted: true };
       throw failure(409, 'result_conflict', 'This request already committed a different result');
@@ -648,13 +721,37 @@ export class RequestController {
         throw failure(409, 'tools_pending', 'All caller tool calls must settle before submitting the final result');
       }
     }
-    record._resultValidator(value);
+
+    try {
+      await record._resultValidator(result, { signal: record._abortController.signal });
+    } catch (error) {
+      if (record.state === 'completed' && record._resultKey !== undefined) {
+        if (record._resultKey === key) return { accepted: true };
+        throw failure(409, 'result_conflict', 'This request already committed a different result');
+      }
+      throw error;
+    }
+
+    this.#sweep();
+    if (record.state === 'completed' && record._resultKey !== undefined) {
+      if (record._resultKey === key) return { accepted: true };
+      throw failure(409, 'result_conflict', 'This request already committed a different result');
+    }
+    if (TERMINAL_STATES.has(record.state) || record.state !== 'running') {
+      throw failure(409, 'request_terminal', 'The request is not running');
+    }
+    for (const call of record._toolCalls.values()) {
+      if (!TOOL_TERMINAL_STATES.has(call.state)) {
+        throw failure(409, 'tools_pending', 'All caller tool calls must settle before submitting the final result');
+      }
+    }
+
     record._resultKey = key;
-    this.#finishRequest(record, 'completed', undefined, this.now(), value);
+    this.#finishRequest(record, 'completed', undefined, this.now(), result);
     return { accepted: true };
   }
 
-  #invokeTool(record, name, args, nativeToolCallId) {
+  async #invokeTool(record, name, args, nativeToolCallId) {
     validateNativeCallId(nativeToolCallId);
     if (TERMINAL_STATES.has(record.state) || record.state !== 'running') {
       throw failure(409, 'request_terminal', 'The request is not running');
@@ -662,8 +759,21 @@ export class RequestController {
     const validator = record._toolValidators.get(name);
     if (!validator) throw failure(400, 'invalid_tool', `Tool ${String(name)} is not declared for this request`);
     validateJson(args, { maxBytes: LIMITS.argumentBytes, maxDepth: LIMITS.jsonDepth });
-    validator.input(args);
-    const argsKey = canonicalJSON(args);
+    const input = structuredClone(args);
+    const argsKey = canonicalJSON(input);
+    const previousBeforeValidation = record._nativeToolCalls.get(nativeToolCallId);
+    if (previousBeforeValidation) {
+      if (previousBeforeValidation.name !== name || previousBeforeValidation._argsKey !== argsKey) {
+        throw failure(409, 'tool_result_conflict', 'nativeToolCallId was reused for a different tool invocation');
+      }
+      return this.#toolOutcomePromise(previousBeforeValidation);
+    }
+
+    await validator.input(input, { signal: record._abortController.signal });
+    this.#sweep();
+    if (TERMINAL_STATES.has(record.state) || record.state !== 'running') {
+      throw failure(409, 'request_terminal', 'The request is not running');
+    }
     const previous = record._nativeToolCalls.get(nativeToolCallId);
     if (previous) {
       if (previous.name !== name || previous._argsKey !== argsKey) {
@@ -684,7 +794,7 @@ export class RequestController {
       toolCallId: randomUUID(),
       name,
       nativeToolCallId,
-      arguments: structuredClone(args),
+      arguments: input,
       state: 'pending',
       createdAt: at,
       updatedAt: at,

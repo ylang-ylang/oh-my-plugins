@@ -78,54 +78,86 @@ function isOwnExtension(prepared) {
   return candidate !== undefined && OWN_EXTENSION_PATHS.has(candidate);
 }
 
-const MAP_SCHEMA_CHILDREN = ['$defs', 'properties', 'patternProperties', 'dependentSchemas'];
-const ARRAY_SCHEMA_CHILDREN = ['allOf', 'anyOf', 'oneOf', 'prefixItems'];
-const SINGLE_SCHEMA_CHILDREN = [
-  'additionalProperties', 'contains', 'contentSchema', 'else', 'if', 'items', 'not',
-  'propertyNames', 'then', 'unevaluatedItems', 'unevaluatedProperties',
-];
+const JSON_SCHEMA_TYPES = new Set(['array', 'boolean', 'integer', 'null', 'number', 'object', 'string']);
 
-function rebaseResultSchema(schema) {
-  if (typeof schema === 'boolean') return schema;
-  const clone = structuredClone(schema);
-
-  function visit(current) {
-    if (typeof current === 'boolean') return;
-    if (typeof current.$ref === 'string' && current.$ref.startsWith('#')) {
-      current.$ref = current.$ref === '#'
-        ? '#/$defs/result'
-        : `#/$defs/result${current.$ref.slice(1)}`;
-    }
-
-    for (const keyword of MAP_SCHEMA_CHILDREN) {
-      const children = current[keyword];
-      if (children === null || typeof children !== 'object' || Array.isArray(children)) continue;
-      for (const child of Object.values(children)) visit(child);
-    }
-    for (const keyword of ARRAY_SCHEMA_CHILDREN) {
-      const children = current[keyword];
-      if (!Array.isArray(children)) continue;
-      for (const child of children) visit(child);
-    }
-    for (const keyword of SINGLE_SCHEMA_CHILDREN) {
-      const child = current[keyword];
-      if (typeof child === 'boolean' || (child !== null && typeof child === 'object' && !Array.isArray(child))) {
-        visit(child);
-      }
-    }
+function projectedType(schema) {
+  const declared = schema?.type;
+  if (typeof declared === 'string' && JSON_SCHEMA_TYPES.has(declared)) return [declared];
+  if (Array.isArray(declared) && declared.length === 1 && JSON_SCHEMA_TYPES.has(declared[0])) {
+    return [declared[0]];
   }
+  return undefined;
+}
 
-  visit(clone);
-  return clone;
+function projectedValueSchema(schema) {
+  const type = projectedType(schema);
+  return type === undefined ? {} : { type };
+}
+
+export function parameterProjection(schema) {
+  const projection = {
+    type: 'object',
+    properties: {},
+    additionalProperties: true,
+  };
+  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return projection;
+
+  const required = Array.isArray(schema.required)
+    ? [...new Set(schema.required.filter(name => typeof name === 'string'))]
+    : [];
+  const properties = schema.properties !== null && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+    ? schema.properties
+    : {};
+  for (const name of required) {
+    Object.defineProperty(projection.properties, name, {
+      value: projectedValueSchema(properties[name]),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  if (required.length > 0) projection.required = required;
+
+  const declaredNames = Object.keys(properties);
+  const hasPatternProperties = schema.patternProperties !== null &&
+    typeof schema.patternProperties === 'object' &&
+    !Array.isArray(schema.patternProperties) &&
+    Object.keys(schema.patternProperties).length > 0;
+  if (schema.additionalProperties === false &&
+      !hasPatternProperties &&
+      declaredNames.every(name => required.includes(name))) {
+    projection.additionalProperties = false;
+  }
+  return projection;
+}
+
+function parameterObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Tool arguments must be a JSON object');
+  }
+  return value;
+}
+
+function parameterAdapter(projection) {
+  const wireSchema = structuredClone(projection);
+  const validate = value => parameterObject(value);
+  Object.defineProperties(validate, {
+    assert: { value: parameterObject },
+    toJsonSchema: { value: () => structuredClone(wireSchema) },
+  });
+  return validate;
+}
+
+export function isolatedParameters(schema) {
+  return parameterAdapter(parameterProjection(schema));
 }
 
 export function resultParameters(schema) {
   return {
     type: 'object',
-    properties: { result: { $ref: '#/$defs/result' } },
+    properties: { result: projectedValueSchema(schema) },
     required: ['result'],
     additionalProperties: false,
-    $defs: { result: rebaseResultSchema(schema) },
   };
 }
 
@@ -149,15 +181,21 @@ function modelToolError(error) {
   const code = typeof error?.code === 'string' ? `${error.code}: ` : '';
   const message = error instanceof Error ? error.message : String(error);
   const errors = Array.isArray(error?.details?.errors) ? error.details.errors : undefined;
-  return new Error(`${code}${message}${errors ? `\nValidation errors: ${JSON.stringify(errors)}` : ''}`);
+  const converted = new Error(`${code}${message}${errors ? `\nValidation errors: ${JSON.stringify(errors)}` : ''}`, {
+    cause: error,
+  });
+  for (const key of ['status', 'code', 'details']) {
+    if (error !== null && typeof error === 'object' && Object.hasOwn(error, key)) converted[key] = error[key];
+  }
+  return converted;
 }
 
-function buildRequestTools(scope, assertCurrent) {
+export function buildRequestTools(scope, assertCurrent) {
   const tools = scope.request.tools.map(tool => ({
     name: tool.name,
     label: tool.name,
-    description: tool.description,
-    parameters: structuredClone(tool.inputSchema),
+    description: `${tool.description}\n\nThe host parameter schema is a non-authoritative safety projection. Before caller-side invocation, arguments are checked in an isolated validator against this authoritative JSON Schema: ${JSON.stringify(tool.inputSchema)}`,
+    parameters: isolatedParameters(tool.inputSchema),
     async execute(nativeToolCallId, params, _onUpdate, _toolContext, toolSignal) {
       assertCurrent();
       if (toolSignal?.aborted) throw abortError(toolSignal);
@@ -195,18 +233,18 @@ function buildRequestTools(scope, assertCurrent) {
     tools.push({
       name: 'rpc_result',
       label: 'RPC result',
-      description: `Submit the final structured result for this RPC request after every caller tool has settled. The result must satisfy this JSON Schema: ${JSON.stringify(scope.request.resultSchema)}`,
-      parameters: resultParameters(scope.request.resultSchema),
+      description: `Submit the final structured result for this RPC request after every caller tool has settled. The host parameter schema is a non-authoritative safety projection. The result is checked in an isolated validator against this authoritative JSON Schema: ${JSON.stringify(scope.request.resultSchema)}`,
+      parameters: parameterAdapter(resultParameters(scope.request.resultSchema)),
       approval: 'read',
       async execute(_nativeToolCallId, params, _onUpdate, _toolContext, toolSignal) {
         assertCurrent();
         if (toolSignal?.aborted) throw abortError(toolSignal);
-        try {
-          const accepted = scope.submitResult(params.result);
-          return toolResult(accepted);
-        } catch (error) {
-          throw modelToolError(error);
-        }
+        let accepted;
+        try { accepted = await scope.submitResult(params.result); }
+        catch (error) { throw modelToolError(error); }
+        assertCurrent();
+        if (toolSignal?.aborted) throw abortError(toolSignal);
+        return toolResult(accepted);
       },
     });
   }

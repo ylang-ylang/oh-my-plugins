@@ -17,6 +17,16 @@ function nextTurn() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+async function waitFor(read, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const value = read();
+    if (value) return value;
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for controller state');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
 function fakeArtifactStore() {
   const registrations = [];
   const records = [];
@@ -93,18 +103,22 @@ const callbackTool = {
   },
 };
 
-test('normalized duplicate submissions are idempotent while wrong identity and conflicting reuse fail', () => {
+test('concurrent normalized duplicate submissions converge while conflicting reuse and wrong identity fail', async () => {
   const h = harness();
-  const first = h.controller.submit(h.request('same'));
-  const duplicate = h.controller.submit(h.request('same', {
-    responseMode: 'native',
-    tools: [],
-    timeoutMs: 300_000,
-    toolTimeoutMs: 60_000,
-  }));
+  const [first, duplicate] = await Promise.all([
+    h.controller.submit(h.request('same')),
+    h.controller.submit(h.request('same', {
+      responseMode: 'native',
+      tools: [],
+      timeoutMs: 300_000,
+      toolTimeoutMs: 60_000,
+    })),
+  ]);
   assert.deepEqual(duplicate, first);
-  assert.throws(
-    () => h.controller.submit(h.request('same', { message: 'different work' })),
+  assert.equal(h.controller.requests.size, 1);
+  assert.equal(h.controller.queue.length, 1);
+  await assert.rejects(
+    h.controller.submit(h.request('same', { message: 'different work' })),
     error => error.code === 'request_conflict',
   );
   assert.throws(
@@ -117,11 +131,28 @@ test('normalized duplicate submissions are idempotent while wrong identity and c
   );
 });
 
-test('queue deadlines include time spent waiting for the interactive host', () => {
+test('CLI takeover aborts request admission that is still compiling schemas', async () => {
+  const h = harness();
+  const pending = h.controller.submit(h.request('compiling', {
+    responseMode: 'structured',
+    resultSchema: {
+      type: 'object',
+      patternProperties: { '^[a-z]+$': { type: 'string' } },
+      additionalProperties: false,
+    },
+  }));
+
+  h.controller.interrupt();
+  await assert.rejects(pending, error => error.code === 'validation_aborted');
+  assert.equal(h.controller.requests.size, 0);
+  assert.equal(h.controller.queue.length, 0);
+});
+
+test('queue deadlines include time spent waiting for the interactive host', async () => {
   let executions = 0;
   const h = harness({ execute: async () => { executions += 1; return { messages: [] }; } });
   h.host.idle = false;
-  h.controller.submit(h.request('deadline', { timeoutMs: 1000 }));
+  await h.controller.submit(h.request('deadline', { timeoutMs: 1000 }));
   h.host.time += 1000;
   h.controller.tick();
   const record = h.controller.get(h.identity('deadline'));
@@ -130,9 +161,9 @@ test('queue deadlines include time spent waiting for the interactive host', () =
   assert.equal(executions, 0);
 });
 
-test('explicit cancellation is terminal, immutable and idempotent', () => {
+test('explicit cancellation is terminal, immutable and idempotent', async () => {
   const h = harness();
-  h.controller.submit(h.request('cancelled'));
+  await h.controller.submit(h.request('cancelled'));
   const first = h.controller.cancel(h.identity('cancelled'));
   assert.equal(first.state, 'cancelled');
   assert.equal(first.error.code, 'client_cancelled');
@@ -161,7 +192,7 @@ test('native mode preserves wire messages, thinking, tool content and native eve
       return { messages, stopReason: 'stop' };
     },
   });
-  h.controller.submit(h.request('native'));
+  await h.controller.submit(h.request('native'));
   h.controller.tick();
   await nextTurn();
 
@@ -183,28 +214,58 @@ test('structured result validation permits correction and exact retry but reject
   const observed = {};
   const h = harness({
     execute: async scope => {
-      assert.throws(
-        () => scope.submitResult({ value: 3 }),
+      await assert.rejects(
+        scope.submitResult({ value: 3 }),
         error => error.code === 'schema_validation',
       );
-      observed.first = scope.submitResult({ value: 'accepted' });
-      observed.retry = scope.submitResult({ value: 'accepted' });
-      assert.throws(
-        () => scope.submitResult({ value: 'different' }),
+      observed.first = await scope.submitResult({ value: 'accepted' });
+      observed.retry = await scope.submitResult({ value: 'accepted' });
+      await assert.rejects(
+        scope.submitResult({ value: 'different' }),
         error => error.code === 'result_conflict',
       );
       observed.abortedAfterCommit = scope.signal.aborted;
       return { messages: [{ role: 'assistant', content: [{ type: 'text', text: 'ignored fallback' }] }] };
     },
   });
-  h.controller.submit(h.request('structured', { responseMode: 'structured', resultSchema: structuredSchema }));
+  await h.controller.submit(h.request('structured', { responseMode: 'structured', resultSchema: structuredSchema }));
   h.controller.tick();
-  await nextTurn();
+  await waitFor(() => h.controller.get(h.identity('structured')).state === 'completed');
 
   assert.deepEqual(observed.first, { accepted: true });
   assert.deepEqual(observed.retry, observed.first);
   assert.equal(observed.abortedAfterCommit, true);
   assert.deepEqual(h.controller.get(h.identity('structured')).result, { value: 'accepted' });
+});
+
+test('cancelling a request aborts structured result validation already running in isolation', async () => {
+  const started = deferred();
+  let validation;
+  const h = harness({
+    execute: async scope => {
+      validation = scope.submitResult({ value: `${'a'.repeat(64 * 1024)}!` });
+      started.resolve();
+      await validation.catch(() => {});
+      return { messages: [] };
+    },
+  });
+  await h.controller.submit(h.request('cancel-validation', {
+    responseMode: 'structured',
+    resultSchema: {
+      type: 'object',
+      properties: { value: { type: 'string', pattern: '^(a+)+$' } },
+      required: ['value'],
+      additionalProperties: false,
+    },
+  }));
+  h.controller.tick();
+  await started.promise;
+
+  const cancelled = h.controller.cancel(h.identity('cancel-validation'));
+  assert.equal(cancelled.state, 'cancelled');
+  await assert.rejects(validation, error => error.code === 'validation_aborted');
+  await nextTurn();
+  assert.deepEqual(h.controller.get(h.identity('cancel-validation')), cancelled);
 });
 
 test('ordinary assistant text never substitutes for a missing structured result', async () => {
@@ -214,7 +275,7 @@ test('ordinary assistant text never substitutes for a missing structured result'
       stopReason: 'stop',
     }),
   });
-  h.controller.submit(h.request('missing', { responseMode: 'structured', resultSchema: structuredSchema }));
+  await h.controller.submit(h.request('missing', { responseMode: 'structured', resultSchema: structuredSchema }));
   h.controller.tick();
   await nextTurn();
 
@@ -229,7 +290,7 @@ test('host failures and malformed native output use bounded safe terminal errors
   const rejected = harness({
     execute: async () => { throw Object.assign(new Error(huge), { status: 500, code: 'host_failed' }); },
   });
-  rejected.controller.submit(rejected.request('rejected'));
+  await rejected.controller.submit(rejected.request('rejected'));
   rejected.controller.tick();
   await nextTurn();
   assert.deepEqual(rejected.controller.get(rejected.identity('rejected')).error, {
@@ -242,7 +303,7 @@ test('host failures and malformed native output use bounded safe terminal errors
   const cyclicMessage = {};
   cyclicMessage.cycle = cyclicMessage;
   malformed.controller.execute = async () => ({ messages: [cyclicMessage] });
-  malformed.controller.submit(malformed.request('malformed'));
+  await malformed.controller.submit(malformed.request('malformed'));
   malformed.controller.tick();
   await nextTurn();
   assert.deepEqual(malformed.controller.get(malformed.identity('malformed')).error, {
@@ -259,10 +320,9 @@ test('callback absolute timeout resolves the agent waiter and expires a late lea
       return { messages: [] };
     },
   });
-  h.controller.submit(h.request('tool-timeout', { tools: [callbackTool], toolTimeoutMs: 1000 }));
+  await h.controller.submit(h.request('tool-timeout', { tools: [callbackTool], toolTimeoutMs: 1000 }));
   h.controller.tick();
-  await nextTurn();
-  const [call] = h.controller.toolCalls(h.identity('tool-timeout')).toolCalls;
+  const call = await waitFor(() => h.controller.toolCalls(h.identity('tool-timeout')).toolCalls[0]);
   const claim = h.controller.claim({
     ...h.identity('tool-timeout'), toolCallId: call.toolCallId,
     workerId: 'worker', claimId: 'claim', leaseMs: 1000,
@@ -275,13 +335,39 @@ test('callback absolute timeout resolves the agent waiter and expires a late lea
     status: 'failed',
     error: { code: 'tool_timeout', message: 'The caller tool deadline expired' },
   });
-  assert.throws(
-    () => h.controller.toolResult({
+  await assert.rejects(
+    h.controller.toolResult({
       ...h.identity('tool-timeout'), toolCallId: call.toolCallId, leaseId: claim.leaseId,
       outcome: { status: 'completed', result: { title: 'late' } },
     }),
     error => error.code === 'lease_expired',
   );
+});
+
+test('a callback result cannot commit after its lease expires during validation', async () => {
+  const h = harness({
+    execute: async scope => {
+      await scope.invokeTool('lookup_item', { id: 9 }, 'lease-race-call');
+      return { messages: [] };
+    },
+  });
+  await h.controller.submit(h.request('lease-race', { tools: [callbackTool] }));
+  h.controller.tick();
+  const call = await waitFor(() => h.controller.toolCalls(h.identity('lease-race')).toolCalls[0]);
+  const claim = h.controller.claim({
+    ...h.identity('lease-race'), toolCallId: call.toolCallId,
+    workerId: 'worker', claimId: 'claim', leaseMs: 1000,
+  });
+
+  const pending = h.controller.toolResult({
+    ...h.identity('lease-race'), toolCallId: call.toolCallId, leaseId: claim.leaseId,
+    outcome: { status: 'completed', result: { title: 'validated' } },
+  });
+  h.host.time = claim.leaseExpiresAt;
+  h.controller.tick();
+
+  await assert.rejects(pending, error => error.code === 'lease_expired');
+  assert.equal(h.controller.toolCall({ ...h.identity('lease-race'), toolCallId: call.toolCallId }).state, 'pending');
 });
 
 test('event retention rejects an expired cursor after more than 256 native events', async () => {
@@ -291,7 +377,7 @@ test('event retention rejects an expired cursor after more than 256 native event
       return { messages: [] };
     },
   });
-  h.controller.submit(h.request('events'));
+  await h.controller.submit(h.request('events'));
   h.controller.tick();
   await nextTurn();
   assert.throws(
@@ -305,19 +391,18 @@ test('leases renew explicitly, stale claims cannot revive, and invalid callback 
   const h = harness({
     execute: async scope => {
       agentOutcome = await scope.invokeTool('lookup_item', { id: 7 }, 'native-call-1');
-      scope.submitResult({ value: agentOutcome.result.title });
+      await scope.submitResult({ value: agentOutcome.result.title });
       return { messages: [] };
     },
   });
-  h.controller.submit(h.request('tools', {
+  await h.controller.submit(h.request('tools', {
     responseMode: 'structured',
     resultSchema: structuredSchema,
     tools: [callbackTool],
   }));
   h.controller.tick();
   await nextTurn();
-
-  const [call] = h.controller.toolCalls(h.identity('tools')).toolCalls;
+  const call = await waitFor(() => h.controller.toolCalls(h.identity('tools')).toolCalls[0]);
   assert.equal(call.nativeToolCallId, 'native-call-1');
   const claimInput = { ...h.identity('tools'), toolCallId: call.toolCallId, workerId: 'worker_1', claimId: 'claim_1', leaseMs: 1000 };
   assert.throws(
@@ -334,8 +419,8 @@ test('leases renew explicitly, stale claims cannot revive, and invalid callback 
   h.controller.tick();
   assert.equal(h.controller.toolCall({ ...h.identity('tools'), toolCallId: call.toolCallId }).state, 'pending');
   assert.throws(() => h.controller.claim(claimInput), error => error.code === 'lease_expired');
-  assert.throws(
-    () => h.controller.toolResult({
+  await assert.rejects(
+    h.controller.toolResult({
       ...h.identity('tools'),
       toolCallId: call.toolCallId,
       leaseId: claim.leaseId,
@@ -351,18 +436,18 @@ test('leases renew explicitly, stale claims cannot revive, and invalid callback 
     leaseId: second.leaseId,
     outcome: { status: 'completed', result: { title: 42 } },
   };
-  assert.throws(() => h.controller.toolResult(reply), error => error.code === 'schema_validation');
+  await assert.rejects(h.controller.toolResult(reply), error => error.code === 'schema_validation');
   assert.equal(h.controller.toolCall({ ...h.identity('tools'), toolCallId: call.toolCallId }).state, 'claimed');
 
   reply.outcome = { status: 'completed', result: { title: 'answer' } };
-  const completed = h.controller.toolResult(reply);
+  const completed = await h.controller.toolResult(reply);
   assert.equal(completed.state, 'completed');
-  assert.deepEqual(h.controller.toolResult(reply), completed);
-  assert.throws(
-    () => h.controller.toolResult({ ...reply, outcome: { status: 'completed', result: { title: 'other' } } }),
+  assert.deepEqual(await h.controller.toolResult(reply), completed);
+  await assert.rejects(
+    h.controller.toolResult({ ...reply, outcome: { status: 'completed', result: { title: 'other' } } }),
     error => error.code === 'tool_result_conflict',
   );
-  await nextTurn();
+  await waitFor(() => h.controller.get(h.identity('tools')).state === 'completed');
 
   assert.deepEqual(agentOutcome, { status: 'completed', result: { title: 'answer' } });
   assert.deepEqual(h.controller.get(h.identity('tools')).result, { value: 'answer' });
@@ -378,11 +463,10 @@ test('CLI takeover interrupts queued and running RPCs, resolves callback waiters
       return { messages: [] };
     },
   });
-  h.controller.submit(h.request('running', { tools: [callbackTool] }));
-  h.controller.submit(h.request('queued'));
+  await h.controller.submit(h.request('running', { tools: [callbackTool] }));
+  await h.controller.submit(h.request('queued'));
   h.controller.tick();
-  await nextTurn();
-  assert.equal(h.controller.toolCalls(h.identity('running')).toolCalls.length, 1);
+  await waitFor(() => h.controller.toolCalls(h.identity('running')).toolCalls.length === 1);
 
   h.controller.interrupt();
   await nextTurn();
@@ -410,7 +494,7 @@ test('close bounds an abort-ignoring executor, always cleans artifacts, and pres
       throw new Error('late provider failure');
     },
   });
-  h.controller.submit(h.request('closing'));
+  await h.controller.submit(h.request('closing'));
   h.controller.tick();
   await nextTurn();
 
@@ -449,7 +533,7 @@ test('artifact capability is request-scoped and direct registration fails when u
     },
   });
   assert.equal(h.controller.session().capabilities.artifacts, false);
-  h.controller.submit(h.request('no-artifacts'));
+  await h.controller.submit(h.request('no-artifacts'));
   h.controller.tick();
   await nextTurn();
   assert.deepEqual(observedCapabilities, { artifacts: false });
@@ -474,13 +558,13 @@ test('artifact registration cannot override closure-bound request ownership', as
         path: '/project/report.txt',
         mediaType: 'text/plain',
       }, 'native-artifact-call');
-      scope.submitResult({ artifactId: metadata.artifactId });
+      await scope.submitResult({ artifactId: metadata.artifactId });
       return { messages: [] };
     },
   });
-  h.controller.submit(h.request('owner', { responseMode: 'structured', resultSchema }));
+  await h.controller.submit(h.request('owner', { responseMode: 'structured', resultSchema }));
   h.controller.tick();
-  await nextTurn();
+  await waitFor(() => h.controller.get(h.identity('owner')).state === 'completed');
 
   assert.equal(artifactStore.registrations[0].requestId, 'owner');
   assert.equal(artifactStore.registrations[0].toolCallId, 'native-artifact-call');

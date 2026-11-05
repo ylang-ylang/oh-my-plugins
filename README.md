@@ -17,7 +17,7 @@ The **OMP host** needs the host-side items below. A separate client machine has 
 | An installed, working OMP | Hosts the session; this plugin does not install OMP itself |
 | Git | Installs or updates the plugin from a repository reference |
 | Bun | OMP 18.2.6 needs `bun` on PATH during plugin installation; recent OMP releases use embedded Bun |
-| Node.js >=22 | Runs the installed `cli.mjs`, including the remote half of SSH discovery and relay access |
+| Node.js >=22 | Required on the OMP host for isolated schema validation, and for `cli.mjs` / SSH relay access |
 | npm package dependencies | This package declares Ajv for bounded JSON Schema validation; the plugin installation must include its dependencies |
 | Homebrew (optional) | One way to install Bun, Git, and Node; not a plugin runtime dependency |
 | OpenSSL (for automatic HTTPS) | Generates the managed self-signed certificate; not needed for HTTP or advanced custom certificate paths |
@@ -113,7 +113,7 @@ If `brew` works but `bun` is still missing, load the appropriate `brew shellenv`
 
 ## Option B: Install Bun directly, without Homebrew
 
-This option still requires Git and, for the standalone client, Node.js >=22.
+This option still requires Git and Node.js >=22 on the OMP host for isolated schema validation, even when OMP itself uses embedded Bun.
 
 Bun's Linux installer needs `unzip`. On Ubuntu/Debian:
 
@@ -257,11 +257,15 @@ For a custom remote install, set `LAN_RPC_REMOTE_CLI` to its absolute remote `cl
 The example performs the complete v2 loop rather than treating `--wait` as a callback worker:
 
 1. It reads `session()` and requires structured-result, caller-tool, and artifact capabilities.
-2. It submits `responseMode: "structured"` with an object result schema requiring string `summary` and `artifactId`, plus a declared `lookup_item` tool whose object input requires integer `id` and whose object result requires string `title` and `status`. The accepted dialect is a bounded draft-2020-12 subset: schemas may use acyclic local JSON-Pointer references, but external references, `$id`, anchors/dynamic references, reference cycles, `pattern`, `patternProperties`, and `uniqueItems: true` are rejected rather than ignored. Expanded references, JSON depth, and bytes are bounded; validation reports the first concrete error and does not coerce data. See [Common conventions](PROTOCOL.md#common-conventions).
+2. It submits `responseMode: "structured"` with an object result schema requiring string `summary` and `artifactId`, plus a declared `lookup_item` tool whose object input requires integer `id` and whose object result requires string `title` and `status`. Caller-defined JSON Schema draft 2020-12 assertions—including `pattern`, `patternProperties`, and `uniqueItems`—are validated in an isolated, terminable Node process, not on OMP's event loop. Compilation and evaluation have resource/time limits; a timeout is an explicit error, not weakened validation. Schemas resolve resources supplied within the document; no external schema is fetched. See [Common conventions](PROTOCOL.md#common-conventions).
 3. `client.run()` polls request state, events, and tool calls concurrently. Its `lookup_item` handler receives `{id}` and returns the schema-valid caller-owned data while the SDK claims and renews the lease.
 4. The prompt tells the isolated child to create `report.txt`, register it with native `rpc_artifact`, and submit exactly one schema-valid `rpc_result({result:{summary,artifactId}})`. Assistant prose is never accepted as the structured result.
 5. `client.download(identity, artifactId, outputPath)` transfers the immutable artifact bytes through SSH without a base64 envelope and creates the local output exclusively; partial output is removed on failure.
 6. It then runs a separate `native` request, collects every `event.data` whose type is `native`, and prints both the terminal native result and `nativeEvents`.
+
+The original caller schema remains authoritative. Native tool parameters expose a safe structural projection because current OMP versions synchronously inspect their parameter schemas; the full schema is included in the tool description, and isolated validation enforces every supported assertion before accepting results or publishing caller tool calls. This does not remove business constraints or silently accept invalid values. `native` response mode never applies a structured-result schema or extracts JSON from assistant text. Consumers should keep their own pre-publication business validation; schemas are not a substitute for authorization or business state.
+
+Validation has a 2000 ms wall-clock limit including queue time, at most two simultaneous workers and 32 queued operations, and a 64 MiB Node V8 heap limit per worker (not a total-process RSS limit). Timeout/cancellation kills the worker; `validation_timeout`, `validation_capacity`, `validation_aborted` and `validation_worker_failed` remain distinct from invalid schema/data. For embedded-Bun OMP, set `OMP_LAN_RPC_NODE=/absolute/path/to/node` before starting OMP if Node is not in a standard Homebrew, `/usr/local/bin`, or `/usr/bin` location. A real Node client uses its own executable. No insecure in-process fallback occurs when the worker runtime is missing.
 
 The artifact half currently requires Linux and a verified `/proc/self/fd` facility for descriptor-pinned, no-follow source traversal. Consumers must check `session.capabilities.artifacts` before requesting files. When it is false—including current macOS/non-Linux hosts—`rpc_artifact` is not exposed and registration returns `host_unsupported`; native and structured chat without artifacts still work. The supplied example intentionally fails its initial capability check rather than assuming file support.
 
@@ -375,7 +379,9 @@ npm test
 
 The status/loader compatibility boundary supports legacy string-key settings and newer registry handles. Host execution is capability-checked; an unsupported host fails explicitly rather than falling back to a parent-session prompt. The standalone client requires Node.js >=22. Ajv is installed as a package dependency for bounded JSON Schema validation; OMP/Pi packages are supplied by the host, not installed as duplicate runtimes.
 
-Verification for this v2 worktree: the complete 82-test suite passes. A real OMP 18.2.6 model turn exercised caller-tool lease/result correction, artifact registration and byte-verified download, explicit structured-result correction, missing-result failure, native messages/events, CLI takeover, and absence of RPC tools/transcript in the subsequent parent turn. Real OMP 18.8.4 independently completed a caller-tool → file → artifact → structured-result workflow using local JSON Schema references, verified artifact bytes/SHA-256 through SSH, and returned native messages/events. A separate real SSH two-instance exercise passed 58 protocol/transport checks with a controlled executor; that test proves SSH routing and binary transfer, not model behavior. Disposable test resources were removed; existing user conversations were not used for these checks.
+The isolated-schema repair passes the complete 89-test suite. Independent real Node/HTTP checks verify standard regex, unique-item, recursive-reference and anchor semantics; a catastrophic regex is terminated at the 2-second budget while session queries remain responsive, cancellation prevents late commits, and subsequent validation succeeds without orphan workers. Prior v2 live-model acceptance on OMP 18.2.6 and 18.8.4 covered caller tools, artifacts, structured/native results and parent isolation; a separate real SSH two-instance exercise passed 58 protocol/transport checks with a controlled executor. Those earlier checks are distinct from the new isolated-validator verification.
+
+The isolated-schema repair was also exercised with real OMP 18.2.6 and 18.8.4 model turns: a result containing a wrongly formatted ticket and duplicate array entries was rejected and corrected before commitment; caller-tool result pattern errors remained correctable without losing the lease; native messages/events still completed normally. A hostile regex did not block live session queries. These checks used disposable sessions, not installed user conversations.
 
 ### Host API isolation
 
@@ -393,7 +399,7 @@ Version differences must be handled inside `host/`, not spread into the RPC impl
 - Add protocol v2 with selectable native messages/events or schema-validated `rpc_result`, isolated RPC execution and CLI takeover, caller-executed native tool callbacks, and controlled file artifacts. V1 clients must migrate explicitly; transport security remains unchanged.
 - Include `ssh-demo.mjs`: IP-only, read-only session discovery and selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and instance/generation checks; never fall back to direct networking.
 - Isolate OMP/Pi integration under `host/` and adapt both legacy settings methods and newer registry handles. Fix extension loading on OMP 18.8.4 (`settings.get is not a function`) while keeping native inline radar placement.
-- Match the SDK custom-tool execution signature and embed the caller's result schema in native `rpc_result` parameters with correctly rebased local references. Keep independent controller validation, preserve boolean schemas and annotations, and cover the modern OMP structured-result path with regression and live-host checks.
+- Match SDK custom-tool execution signatures and advertise safe native parameter structure plus complete caller schemas in tool descriptions. Enforce original schemas in isolated workers, support standard regex/unique/recursive-reference assertions, and recheck request/lease state after asynchronous validation.
 
 ## Historical v0.4.0 (protocol v1)
 

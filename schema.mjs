@@ -1,8 +1,7 @@
 import { Buffer } from 'node:buffer';
-import Ajv2020 from 'ajv/dist/2020.js';
 import { LIMITS, failure, validateId, validateIdentity } from './protocol.mjs';
+import { runSchemaOperation } from './schema-runtime.mjs';
 
-const TOOL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const REQUEST_FIELDS = new Set([
   'instanceId',
   'generation',
@@ -15,49 +14,7 @@ const REQUEST_FIELDS = new Set([
   'toolTimeoutMs',
 ]);
 const TOOL_FIELDS = new Set(['name', 'description', 'inputSchema', 'resultSchema']);
-const SCHEMA_KEYWORDS = new Set([
-  '$anchor', '$comment', '$defs', '$dynamicAnchor', '$dynamicRef', '$id', '$ref', '$schema', '$vocabulary',
-  'additionalProperties', 'allOf', 'anyOf', 'const', 'contains', 'contentEncoding', 'contentMediaType',
-  'contentSchema', 'default', 'dependentRequired', 'dependentSchemas', 'deprecated', 'description', 'else',
-  'enum', 'examples', 'exclusiveMaximum', 'exclusiveMinimum', 'format', 'if', 'items', 'maxContains',
-  'maximum', 'maxItems', 'maxLength', 'maxProperties', 'minContains', 'minimum', 'minItems', 'minLength',
-  'minProperties', 'multipleOf', 'not', 'oneOf', 'pattern', 'patternProperties', 'prefixItems', 'properties',
-  'propertyNames', 'readOnly', 'required', 'then', 'title', 'type', 'unevaluatedItems',
-  'unevaluatedProperties', 'uniqueItems', 'writeOnly',
-]);
-const MAP_SCHEMA_KEYWORDS = ['$defs', 'properties', 'dependentSchemas'];
-const ARRAY_SCHEMA_KEYWORDS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'];
-const SINGLE_SCHEMA_KEYWORDS = [
-  'additionalProperties',
-  'contains',
-  'contentSchema',
-  'else',
-  'if',
-  'items',
-  'not',
-  'propertyNames',
-  'then',
-  'unevaluatedItems',
-  'unevaluatedProperties',
-];
-const REFERENCE_KEYWORDS = ['$ref'];
-const REGEX_SCHEMA_KEYWORDS = ['pattern', 'patternProperties'];
-const UNSUPPORTED_REFERENCE_KEYWORDS = ['$id', '$anchor', '$dynamicAnchor', '$dynamicRef'];
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
-
-const ajv = new Ajv2020({
-  addUsedSchema: false,
-  allErrors: false,
-  allowUnionTypes: true,
-  coerceTypes: false,
-  removeAdditional: false,
-  useDefaults: false,
-  validateFormats: false,
-  strict: true,
-  ownProperties: true,
-});
-
-const MAX_VALIDATION_WORK = LIMITS.schemaNodes * LIMITS.schemaNodes;
 
 function pointerPart(value) {
   return value.replaceAll('~', '~0').replaceAll('/', '~1');
@@ -75,6 +32,19 @@ function assertLimit(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${label} must be a non-negative safe integer`);
   }
+}
+
+function isArrayIndex(key, length) {
+  if (typeof key !== 'string' || key.length === 0) return false;
+  if (key.length > 1 && key[0] === '0') return false;
+  let index = 0;
+  for (let position = 0; position < key.length; position += 1) {
+    const digit = key.charCodeAt(position) - 48;
+    if (digit < 0 || digit > 9) return false;
+    index = (index * 10) + digit;
+    if (!Number.isSafeInteger(index)) return false;
+  }
+  return index < length;
 }
 
 function inspectJson(value, {
@@ -145,8 +115,7 @@ function inspectJson(value, {
         throw invalidJson(path, 'must be a dense array without extra properties');
       }
       for (const key of keys) {
-        if (key === 'length') continue;
-        if (typeof key !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= current.length) {
+        if (key !== 'length' && !isArrayIndex(key, current.length)) {
           throw invalidJson(path, 'must be a dense array without extra properties');
         }
       }
@@ -222,301 +191,26 @@ function schemaError(instancePath, keyword, message, schemaPath = '#') {
   return { instancePath, schemaPath, keyword, message };
 }
 
-function normalizeAjvErrors(errors) {
-  return (errors ?? []).map(error => ({
-    instancePath: error.instancePath,
-    schemaPath: error.schemaPath,
-    keyword: error.keyword,
-    message: error.message ?? '',
-  }));
-}
-
 function assertSchemaBounds(schema, label) {
+  let nodes;
   try {
-    inspectJson(schema, { maxBytes: LIMITS.requestBytes, maxDepth: LIMITS.jsonDepth });
+    ({ nodes } = inspectJson(schema, { maxBytes: LIMITS.requestBytes, maxDepth: LIMITS.jsonDepth }));
   } catch (error) {
     if (!error?.code) throw error;
     throw schemaFailure(label, error.message, [
       schemaError(error.details?.instancePath ?? '', 'json', error.message),
     ]);
   }
-
-  let nodes = 0;
-  const pending = [schema];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    nodes += 1;
-    if (nodes > LIMITS.schemaNodes) {
-      throw schemaFailure(label, `exceeds ${LIMITS.schemaNodes} JSON nodes`, [
-        schemaError('', 'maxNodes', `must contain at most ${LIMITS.schemaNodes} JSON nodes`),
-      ]);
-    }
-    if (current !== null && typeof current === 'object') {
-      if (Array.isArray(current)) pending.push(...current);
-      else pending.push(...Object.values(current));
-    }
-  }
-  return nodes;
-}
-
-function assertLocalSchemas(schema, label, path = '') {
-  if (typeof schema === 'boolean') return;
-  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return;
-
-  for (const keyword of REGEX_SCHEMA_KEYWORDS) {
-    if (!hasOwn(schema, keyword)) continue;
-    const instancePath = childPath(path, keyword);
-    throw schemaFailure(label, `uses unsupported regular-expression keyword "${keyword}" at ${instancePath}`, [
-      schemaError(instancePath, keyword, 'is unsupported because regular-expression evaluation cannot be bounded'),
-    ]);
-  }
-
-  for (const keyword of UNSUPPORTED_REFERENCE_KEYWORDS) {
-    if (!hasOwn(schema, keyword)) continue;
-    const instancePath = childPath(path, keyword);
-    throw schemaFailure(label, `uses unsupported reference keyword "${keyword}" at ${instancePath}`, [
-      schemaError(instancePath, keyword, 'is unsupported by the bounded local-reference subset'),
-    ]);
-  }
-
-  if (schema.uniqueItems === true) {
-    const instancePath = childPath(path, 'uniqueItems');
-    throw schemaFailure(label, `uses unsupported uniqueItems assertion at ${instancePath}`, [
-      schemaError(instancePath, 'uniqueItems', 'is unsupported because object comparison work cannot be bounded'),
-    ]);
-  }
-
-  for (const key of Object.keys(schema)) {
-    if (!SCHEMA_KEYWORDS.has(key)) {
-      const instancePath = childPath(path, key);
-      throw schemaFailure(label, `contains unknown keyword "${key}" at ${instancePath}`, [
-        schemaError(instancePath, 'unknownKeyword', 'must be a supported draft 2020-12 keyword'),
-      ]);
-    }
-  }
-
-  for (const keyword of REFERENCE_KEYWORDS) {
-    if (!hasOwn(schema, keyword)) continue;
-    const reference = schema[keyword];
-    if (typeof reference !== 'string' || (reference !== '#' && !reference.startsWith('#/'))) {
-      const instancePath = childPath(path, keyword);
-      throw schemaFailure(label, `contains unsupported ${keyword} at ${instancePath}`, [
-        schemaError(instancePath, keyword, 'must be a local JSON Pointer reference'),
-      ]);
-    }
-  }
-
-  for (const keyword of MAP_SCHEMA_KEYWORDS) {
-    const entries = schema[keyword];
-    if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) continue;
-    for (const [key, child] of Object.entries(entries)) {
-      assertLocalSchemas(child, label, childPath(childPath(path, keyword), key));
-    }
-  }
-
-
-  for (const keyword of ARRAY_SCHEMA_KEYWORDS) {
-    const children = schema[keyword];
-    if (!Array.isArray(children)) continue;
-    for (let index = 0; index < children.length; index += 1) {
-      assertLocalSchemas(children[index], label, childPath(childPath(path, keyword), index));
-    }
-  }
-
-  for (const keyword of SINGLE_SCHEMA_KEYWORDS) {
-    const child = schema[keyword];
-    if (typeof child === 'boolean' || (child !== null && typeof child === 'object' && !Array.isArray(child))) {
-      assertLocalSchemas(child, label, childPath(path, keyword));
-    }
-  }
-}
-
-function forEachSchemaChild(schema, path, visit) {
-  for (const keyword of MAP_SCHEMA_KEYWORDS) {
-    const entries = schema[keyword];
-    if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) continue;
-    for (const [key, child] of Object.entries(entries)) {
-      visit(child, childPath(childPath(path, keyword), key));
-    }
-  }
-
-  for (const keyword of ARRAY_SCHEMA_KEYWORDS) {
-    const children = schema[keyword];
-    if (!Array.isArray(children)) continue;
-    for (let index = 0; index < children.length; index += 1) {
-      visit(children[index], childPath(childPath(path, keyword), index));
-    }
-  }
-
-  for (const keyword of SINGLE_SCHEMA_KEYWORDS) {
-    const child = schema[keyword];
-    if (typeof child === 'boolean' || (child !== null && typeof child === 'object' && !Array.isArray(child))) {
-      visit(child, childPath(path, keyword));
-    }
-  }
-}
-
-function decodePointerPart(value) {
-  let decoded = '';
-  for (let index = 0; index < value.length; index += 1) {
-    if (value[index] !== '~') {
-      decoded += value[index];
-      continue;
-    }
-    const escape = value[index + 1];
-    if (escape !== '0' && escape !== '1') return undefined;
-    decoded += escape === '0' ? '~' : '/';
-    index += 1;
-  }
-  return decoded;
-}
-
-function resolveLocalPointer(root, reference, label, instancePath) {
-  if (reference === '#') return { target: root, targetPath: '' };
-
-  let pointer;
-  try {
-    pointer = decodeURIComponent(reference.slice(1));
-  } catch {
-    pointer = undefined;
-  }
-  if (pointer === undefined || !pointer.startsWith('/')) {
-    throw schemaFailure(label, `contains invalid local reference at ${instancePath}`, [
-      schemaError(instancePath, '$ref', 'must contain a valid URI-encoded JSON Pointer'),
-    ]);
-  }
-
-  let target = root;
-  for (const encodedPart of pointer.slice(1).split('/')) {
-    const part = decodePointerPart(encodedPart);
-    if (part === undefined || target === null || typeof target !== 'object' || !hasOwn(target, part)) {
-      throw schemaFailure(label, `contains unresolved local reference at ${instancePath}`, [
-        schemaError(instancePath, '$ref', `must resolve to an existing schema: ${reference}`),
-      ]);
-    }
-    target = target[part];
-  }
-
-  if (typeof target !== 'boolean' && (target === null || typeof target !== 'object' || Array.isArray(target))) {
-    throw schemaFailure(label, `contains non-schema local reference at ${instancePath}`, [
-      schemaError(instancePath, '$ref', `must resolve to a boolean or object schema: ${reference}`),
-    ]);
-  }
-  return { target, targetPath: pointer };
-}
-
-function jsonNodeCount(value) {
-  let nodes = 0;
-  const pending = [value];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    nodes += 1;
-    if (current !== null && typeof current === 'object') {
-      if (Array.isArray(current)) pending.push(...current);
-      else pending.push(...Object.values(current));
-    }
-  }
-  return nodes;
-}
-
-function assertReferenceComplexity(root, label, baseNodes) {
-  let expandedNodes = baseNodes;
-
-  function visit(schema, path, chain) {
-    if (typeof schema === 'boolean') return;
-    if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return;
-
-    if (hasOwn(schema, '$ref')) {
-      const instancePath = childPath(path, '$ref');
-      const { target, targetPath } = resolveLocalPointer(root, schema.$ref, label, instancePath);
-      assertLocalSchemas(target, label, targetPath);
-      if (chain.has(target)) {
-        throw schemaFailure(label, `contains recursive local reference at ${instancePath}`, [
-          schemaError(instancePath, '$ref', 'must not create a recursive reference cycle'),
-        ]);
-      }
-
-      expandedNodes += jsonNodeCount(target);
-      if (expandedNodes > LIMITS.schemaNodes) {
-        throw schemaFailure(label, `expanded local references exceed ${LIMITS.schemaNodes} JSON nodes`, [
-          schemaError(instancePath, '$ref', `expanded validation graph must contain at most ${LIMITS.schemaNodes} JSON nodes`),
-        ]);
-      }
-
-      if (target !== null && typeof target === 'object') chain.add(target);
-      visit(target, targetPath, chain);
-      if (target !== null && typeof target === 'object') chain.delete(target);
-    }
-
-    forEachSchemaChild(schema, path, (child, childInstancePath) => {
-      visit(child, childInstancePath, chain);
-    });
-  }
-
-  const chain = new Set();
-  if (root !== null && typeof root === 'object') chain.add(root);
-  visit(root, '', chain);
-  return expandedNodes;
-}
-
-export function compileSchema(schema, label = 'schema') {
-  const schemaNodes = assertSchemaBounds(schema, label);
   if (typeof schema !== 'boolean' && (schema === null || typeof schema !== 'object' || Array.isArray(schema))) {
     throw schemaFailure(label, 'must be a boolean or object JSON Schema', [
       schemaError('', 'type', 'must be a boolean or object'),
     ]);
   }
-  assertLocalSchemas(schema, label);
-  const validationNodes = assertReferenceComplexity(schema, label, schemaNodes);
-
-  if (!ajv.validateSchema(schema)) {
-    throw schemaFailure(label, 'is not a valid draft 2020-12 schema', normalizeAjvErrors(ajv.errors));
-  }
-
-  let compiled;
-  try {
-    compiled = ajv.compile(schema);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown compilation error';
-    throw schemaFailure(label, `cannot be compiled: ${message}`, [
-      schemaError('', 'compile', message),
+  if (nodes > LIMITS.schemaNodes) {
+    throw schemaFailure(label, `exceeds ${LIMITS.schemaNodes} JSON nodes`, [
+      schemaError('', 'maxNodes', `must contain at most ${LIMITS.schemaNodes} JSON nodes`),
     ]);
   }
-
-  return function validate(value) {
-    let dataNodes;
-    try {
-      ({ nodes: dataNodes } = inspectJson(value, {
-        maxBytes: LIMITS.resultBytes,
-        maxDepth: LIMITS.jsonDepth,
-      }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'value is not bounded JSON';
-      throw failure(422, 'schema_validation', `${label} data is not bounded JSON`, {
-        errors: [schemaError(error?.details?.instancePath ?? '', 'json', message)],
-      });
-    }
-    if (validationNodes > Math.floor(MAX_VALIDATION_WORK / dataNodes)) {
-      throw failure(422, 'schema_validation', `${label} data exceeds validation complexity limit`, {
-        errors: [schemaError('', 'complexity', `schema and data may require more than ${MAX_VALIDATION_WORK} validation steps`)],
-      });
-    }
-
-    let valid;
-    try {
-      valid = compiled(value);
-    } catch {
-      throw failure(422, 'schema_validation', `${label} could not be validated safely`, {
-        errors: [schemaError('', 'validation', 'schema evaluation did not complete')],
-      });
-    }
-    if (!valid) {
-      throw failure(422, 'schema_validation', `${label} does not match its schema`, {
-        errors: normalizeAjvErrors(compiled.errors),
-      });
-    }
-    return value;
-  };
 }
 
 function cloneJson(value) {
@@ -525,6 +219,48 @@ function cloneJson(value) {
   } catch {
     throw failure(400, 'invalid_json', 'JSON value could not be cloned safely');
   }
+}
+
+function validationJsonFailure(label, error) {
+  const message = error instanceof Error ? error.message : 'value is not bounded JSON';
+  return failure(422, 'schema_validation', `${label} data is not bounded JSON`, {
+    errors: [schemaError(error?.details?.instancePath ?? '', 'json', message)],
+  });
+}
+
+function assertSignal(signal) {
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new TypeError('signal must be an AbortSignal');
+  }
+  if (signal?.aborted) throw failure(409, 'validation_aborted', 'schema validation operation was aborted');
+}
+
+export async function compileSchema(schema, label = 'schema', {
+  signal,
+  timeoutMs = LIMITS.validationTimeoutMs,
+} = {}) {
+  assertSignal(signal);
+  assertSchemaBounds(schema, label);
+  const isolatedSchema = cloneJson(schema);
+  await runSchemaOperation(
+    { operation: 'compile', schema: isolatedSchema, label },
+    { signal, timeoutMs },
+  );
+
+  return async function validate(value, { signal: validationSignal } = {}) {
+    assertSignal(validationSignal);
+    try {
+      inspectJson(value, { maxBytes: LIMITS.resultBytes, maxDepth: LIMITS.jsonDepth });
+    } catch (error) {
+      throw validationJsonFailure(label, error);
+    }
+    const isolatedValue = cloneJson(value);
+    await runSchemaOperation(
+      { operation: 'validate', schema: isolatedSchema, data: isolatedValue, label },
+      { signal: validationSignal, timeoutMs },
+    );
+    return value;
+  };
 }
 
 function rejectUnknownFields(value, allowed, code, label) {
@@ -548,7 +284,41 @@ function declaresObjectSchema(schema) {
   return Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'object';
 }
 
-export function prepareRequest(body, { reservedToolNames = [] } = {}) {
+function isAsciiLetter(code) {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isToolName(value) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 64 || !isAsciiLetter(value.charCodeAt(0))) {
+    return false;
+  }
+  for (let index = 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (!isAsciiLetter(code) && (code < 48 || code > 57) && code !== 95) return false;
+  }
+  return true;
+}
+
+async function compileSchemas(entries, signal) {
+  if (entries.length === 0) return [];
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const operations = entries.map(({ schema, label }) => compileSchema(schema, label, { signal: controller.signal }));
+  try {
+    return await Promise.all(operations);
+  } catch (error) {
+    controller.abort();
+    await Promise.allSettled(operations);
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+export async function prepareRequest(body, { reservedToolNames = [], signal } = {}) {
+  assertSignal(signal);
   inspectJson(body, {
     maxBytes: LIMITS.requestBytes,
     maxDepth: LIMITS.jsonDepth,
@@ -604,7 +374,7 @@ export function prepareRequest(body, { reservedToolNames = [] } = {}) {
     for (const field of TOOL_FIELDS) {
       if (!hasOwn(tool, field)) throw failure(400, 'invalid_tool', `${label}.${field} is required`);
     }
-    if (typeof tool.name !== 'string' || !TOOL_NAME_PATTERN.test(tool.name) || tool.name.startsWith('rpc_')) {
+    if (!isToolName(tool.name) || tool.name.startsWith('rpc_')) {
       throw failure(400, 'invalid_tool', `${label}.name is invalid or reserved`);
     }
     if (names.has(tool.name) || reserved.has(tool.name)) {
@@ -625,15 +395,21 @@ export function prepareRequest(body, { reservedToolNames = [] } = {}) {
     };
   });
 
-  const resultValidator = responseMode === 'structured'
-    ? compileSchema(source.resultSchema, 'resultSchema')
-    : undefined;
-  const toolValidators = new Map();
+  const schemas = [];
+  if (responseMode === 'structured') schemas.push({ schema: source.resultSchema, label: 'resultSchema' });
   for (let index = 0; index < normalizedTools.length; index += 1) {
     const tool = normalizedTools[index];
+    schemas.push({ schema: tool.inputSchema, label: `tools[${index}].inputSchema` });
+    schemas.push({ schema: tool.resultSchema, label: `tools[${index}].resultSchema` });
+  }
+  const compiled = await compileSchemas(schemas, signal);
+  let compiledIndex = 0;
+  const resultValidator = responseMode === 'structured' ? compiled[compiledIndex++] : undefined;
+  const toolValidators = new Map();
+  for (const tool of normalizedTools) {
     toolValidators.set(tool.name, {
-      input: compileSchema(tool.inputSchema, `tools[${index}].inputSchema`),
-      result: compileSchema(tool.resultSchema, `tools[${index}].resultSchema`),
+      input: compiled[compiledIndex++],
+      result: compiled[compiledIndex++],
     });
   }
 

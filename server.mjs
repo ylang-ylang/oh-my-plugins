@@ -153,15 +153,10 @@ function normalizedSession(value, instanceId) {
   };
 }
 
-function invokeSync(callback, argument, name) {
-  const value = argument === undefined ? callback() : callback(argument);
-  if (value !== null &&
-      (typeof value === "object" || typeof value === "function") &&
-      typeof value.then === "function") {
-    void Promise.resolve(value).catch(() => {});
-    throw new TypeError(`${name} must be synchronous`);
-  }
-  return value;
+async function controllerCall(controller, name, argument, options) {
+  const callback = controller[name];
+  if (argument === undefined) return await callback.call(controller);
+  return await callback.call(controller, argument, options);
 }
 
 function parseGeneration(value) {
@@ -523,7 +518,7 @@ async function sendArtifact(req, res, value) {
   if (streamError !== undefined) throw streamError;
 }
 
-async function routeRequest(req, res, context) {
+async function routeRequest(req, res, context, signal) {
   if (context.tokenDigest !== undefined && !hasSingleBearerToken(req, context.tokenDigest)) {
     sendError(req, res, 401, "unauthorized", "valid Bearer authentication is required", {
       "WWW-Authenticate": 'Bearer realm="omp-lan-rpc"',
@@ -548,16 +543,12 @@ async function routeRequest(req, res, context) {
   }
 
   const controller = context.controller;
-  const invoke = (name, argument) => invokeSync(
-    controller[name].bind(controller),
-    argument,
-    `controller.${name}()`,
-  );
+  const invoke = (name, argument) => controllerCall(controller, name, argument, { signal });
 
   if (url.pathname === "/v2/session") {
     if (!requireMethod(req, res, "GET")) return;
     validateQuery(url, []);
-    sendJson(req, res, 200, normalizedSession(invoke("session"), context.instanceId));
+    sendJson(req, res, 200, normalizedSession(await invoke("session"), context.instanceId));
     return;
   }
 
@@ -569,7 +560,7 @@ async function routeRequest(req, res, context) {
       ["instanceId", "generation", "requestId", "message", "responseMode", "resultSchema", "tools", "timeoutMs", "toolTimeoutMs"],
       ["instanceId", "generation", "requestId", "message"]);
     validateId(body.requestId);
-    sendJson(req, res, 202, invoke("submit", body));
+    sendJson(req, res, 202, await invoke("submit", body));
     return;
   }
 
@@ -583,7 +574,7 @@ async function routeRequest(req, res, context) {
   if (segments.length === 4) {
     if (!requireMethod(req, res, "GET")) return;
     const identity = { ...queryIdentity(url), requestId };
-    sendJson(req, res, 200, invoke("get", identity));
+    sendJson(req, res, 200, await invoke("get", identity));
     return;
   }
 
@@ -592,7 +583,7 @@ async function routeRequest(req, res, context) {
     validateQuery(url, []);
     const body = await readJsonBody(req);
     const identity = bodyIdentity(body, ["instanceId", "generation"]);
-    sendJson(req, res, 200, invoke("cancel", { ...identity, requestId }));
+    sendJson(req, res, 200, await invoke("cancel", { ...identity, requestId }));
     return;
   }
 
@@ -600,14 +591,14 @@ async function routeRequest(req, res, context) {
     if (!requireMethod(req, res, "GET")) return;
     const identity = queryIdentity(url, ["after"]);
     const after = parseAfter(url.searchParams.get("after"));
-    sendJson(req, res, 200, invoke("events", { ...identity, requestId, after }));
+    sendJson(req, res, 200, await invoke("events", { ...identity, requestId, after }));
     return;
   }
 
   if (segments.length === 5 && segments[4] === "tool-calls") {
     if (!requireMethod(req, res, "GET")) return;
     const identity = { ...queryIdentity(url), requestId };
-    sendJson(req, res, 200, invoke("toolCalls", identity));
+    sendJson(req, res, 200, await invoke("toolCalls", identity));
     return;
   }
 
@@ -616,7 +607,7 @@ async function routeRequest(req, res, context) {
     if (segments.length === 6) {
       if (!requireMethod(req, res, "GET")) return;
       const identity = { ...queryIdentity(url), requestId, toolCallId };
-      sendJson(req, res, 200, invoke("toolCall", identity));
+      sendJson(req, res, 200, await invoke("toolCall", identity));
       return;
     }
     if (segments.length === 7 && segments[6] === "claim") {
@@ -626,7 +617,7 @@ async function routeRequest(req, res, context) {
       const identity = bodyIdentity(body,
         ["instanceId", "generation", "workerId", "claimId", "leaseMs", "renew"],
         ["instanceId", "generation", "workerId", "claimId"]);
-      sendJson(req, res, 200, invoke("claim", { ...body, ...identity, requestId, toolCallId }));
+      sendJson(req, res, 200, await invoke("claim", { ...body, ...identity, requestId, toolCallId }));
       return;
     }
     if (segments.length === 7 && segments[6] === "result") {
@@ -636,7 +627,7 @@ async function routeRequest(req, res, context) {
       const identity = bodyIdentity(body,
         ["instanceId", "generation", "leaseId", "outcome"],
         ["instanceId", "generation", "leaseId", "outcome"]);
-      sendJson(req, res, 200, invoke("toolResult", { ...body, ...identity, requestId, toolCallId }));
+      sendJson(req, res, 200, await invoke("toolResult", { ...body, ...identity, requestId, toolCallId }));
       return;
     }
   }
@@ -644,7 +635,7 @@ async function routeRequest(req, res, context) {
   if (segments.length === 5 && segments[4] === "artifacts") {
     if (!requireMethod(req, res, "GET")) return;
     const identity = { ...queryIdentity(url), requestId };
-    sendJson(req, res, 200, invoke("artifacts", identity));
+    sendJson(req, res, 200, await invoke("artifacts", identity));
     return;
   }
 
@@ -652,7 +643,7 @@ async function routeRequest(req, res, context) {
     if (!requireMethod(req, res, "GET")) return;
     const artifactId = parseUuidId(segments[5], "artifactId", "invalid_artifact");
     const identity = { ...queryIdentity(url), requestId, artifactId };
-    await sendArtifact(req, res, await controller.artifact(identity));
+    await sendArtifact(req, res, await invoke("artifact", identity));
     return;
   }
 
@@ -755,7 +746,14 @@ export async function startServer({ controller, onError } = {}) {
       // Socket failures are peer-controlled and must not become uncaught EventEmitter errors.
       req.on("error", () => {});
       res.on("error", () => {});
-      void routeRequest(req, res, context).catch((error) => {
+      const operation = new AbortController();
+      const onAborted = () => operation.abort(failure(409, "validation_aborted", "request connection closed during validation"));
+      const onResponseClose = () => {
+        if (!res.writableEnded) onAborted();
+      };
+      req.once("aborted", onAborted);
+      res.once("close", onResponseClose);
+      void routeRequest(req, res, context, operation.signal).catch((error) => {
         const details = errorDetails(error);
         if (details.report) safeReport(onError, error);
         try {
@@ -768,6 +766,9 @@ export async function startServer({ controller, onError } = {}) {
           safeReport(onError, responseError);
           res.destroy();
         }
+      }).finally(() => {
+        req.off("aborted", onAborted);
+        res.off("close", onResponseClose);
       });
     };
 
@@ -801,7 +802,7 @@ export async function startServer({ controller, onError } = {}) {
       throw new Error("LAN RPC server did not bind a TCP address");
     }
     const endpoint = endpointFor(tls === undefined ? "http" : "https", config.host, address.port);
-    const session = normalizedSession(invokeSync(controller.session.bind(controller), undefined, "controller.session()"), instanceId);
+    const session = normalizedSession(await controllerCall(controller, "session"), instanceId);
     await writeDescriptorAtomic(descriptorFile, {
       instanceId,
       pid: process.pid,
