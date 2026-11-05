@@ -4,12 +4,48 @@
   "private": true,
   "type": "module",
   "description": "Local and LAN message access to an OMP session: anonymous HTTP or verified, authenticated HTTPS",
-  "repository": { "type": "git", "url": "git+https://github.com/ylang-ylang/omp-lan-rpc.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylang-ylang/omp-lan-rpc.git"
+  },
   "homepage": "https://github.com/ylang-ylang/omp-lan-rpc",
-  "bugs": { "url": "https://github.com/ylang-ylang/omp-lan-rpc/issues" },
-  "engines": { "node": ">=22" },
-  "bin": { "omp-lan-rpc": "./cli.mjs" },
-  "omp": { "extensions": ["./extension.mjs"] },
-  "files": ["extension.mjs", "host/", "status.mjs", "controller.mjs", "server.mjs", "config.mjs", "tls.mjs", "cli.mjs", "ssh-demo.mjs"],
-  "scripts": { "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs config.test.mjs tls.test.mjs status.test.mjs" }
+  "bugs": {
+    "url": "https://github.com/ylang-ylang/omp-lan-rpc/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "omp-lan-rpc": "./cli.mjs"
+  },
+  "omp": {
+    "extensions": [
+      "./extension.mjs"
+    ]
+  },
+  "files": [
+    "extension.mjs",
+    "host/index.mjs",
+    "host/settings.mjs",
+    "host/execution.mjs",
+    "status.mjs",
+    "controller.mjs",
+    "protocol.mjs",
+    "schema.mjs",
+    "artifacts.mjs",
+    "sdk.mjs",
+    "examples/",
+    "PROTOCOL.md",
+    "server.mjs",
+    "config.mjs",
+    "tls.mjs",
+    "cli.mjs",
+    "ssh-demo.mjs"
+  ],
+  "scripts": {
+    "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs sdk.test.mjs schema.test.mjs artifacts.test.mjs config.test.mjs tls.test.mjs status.test.mjs host/execution.test.mjs"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0"
+  }
 }

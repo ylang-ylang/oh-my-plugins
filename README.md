@@ -4,19 +4,26 @@ Local and LAN message access to a running, ordinary OMP session: **anonymous HTT
 
 **Default cross-machine workflow: authenticated, host-verified SSH must already work.** Discover sessions through SSH and access their HTTP API from the remote host. Keep the default loopback listener when using this workflow; no LAN exposure, discovery daemon or fixed RPC port is needed. Direct LAN HTTP/HTTPS remains an explicit alternative, not an automatic fallback when SSH fails.
 
+**Protocol v2 offers two explicit response modes.** `native` (default) completes with the isolated turn's unmodified native message array and separately exposes native events, including thinking and tool calls/results, without parsing free text. `structured` requires a caller-defined JSON Schema and an explicit native `rpc_result` submission. Both use request-scoped tools and an isolated child; CLI input takes priority and never inherits RPC formatting rules. See [PROTOCOL.md](PROTOCOL.md) for exact requests, states, caller tools, file downloads, events, limits, and v1 migration.
+
+One machine's sessions share a single **external SSH ingress**, not a new shared HTTP daemon. Each OMP retains its private listener; clients discover and route by instance/generation through SSH. HTTP/HTTPS remains an explicit direct-connect alternative.
+
 ## Check dependencies first
 
-**Run these steps on the machine that runs OMP, not on a different development machine.**
+The **OMP host** needs the host-side items below. A separate client machine has different requirements, described after the table.
 
-| Dependency | Purpose |
+| OMP-host dependency | Purpose |
 | --- | --- |
 | An installed, working OMP | Hosts the session; this plugin does not install OMP itself |
-| Git | Installs the plugin from GitHub |
+| Git | Installs or updates the plugin from a repository reference |
 | Bun | OMP 18.2.6 needs `bun` on PATH during plugin installation; recent OMP releases use embedded Bun |
-| Node.js >=22 | Runs the standalone command-line client |
+| Node.js >=22 | Runs the installed `cli.mjs`, including the remote half of SSH discovery and relay access |
+| npm package dependencies | This package declares Ajv for bounded JSON Schema validation; the plugin installation must include its dependencies |
 | Homebrew (optional) | One way to install Bun, Git, and Node; not a plugin runtime dependency |
 | OpenSSL (for automatic HTTPS) | Generates the managed self-signed certificate; not needed for HTTP or advanced custom certificate paths |
 | Nerd Fonts (for the indicator) | The terminal displaying OMP needs the `md-radar` glyph (U+F0437); for SSH, configure the client terminal's font. This does not affect network access |
+
+A client machine running `ssh-demo.mjs`, `examples/client.mjs`, or `sdk.mjs` needs Node.js >=22 and the corresponding files from a complete checkout or installation. SSH mode additionally needs system OpenSSH plus an already trusted/authenticated account; it does not need OMP locally. A non-Node client may implement the documented HTTP/JSON or SSH relay contract in another language, but the OMP host still needs Node.js >=22 for its installed CLI. Direct HTTP/HTTPS clients do not need OpenSSH.
 
 If you see:
 
@@ -138,17 +145,15 @@ On a machine with npm, `npm install -g bun` is another option. If a recent npm b
 
 ## Install the plugin
 
-Once prerequisites are ready:
+Protocol v2 is available on the development `main` branch, but has no new release tag yet. The `0.4.0` value in package metadata is not a v2 release declaration; the historical `v0.4.0` tag still implements protocol v1. Follow `main` with the command below, or replace `main` with a reviewed full commit ID for a reproducible installation:
 
 ```bash
-omp plugin install github:ylang-ylang/omp-lan-rpc
+omp plugin install 'github:ylang-ylang/omp-lan-rpc#main'
 ```
 
-To upgrade an existing installation to this release without reusing an older Git dependency cache:
+For development from a local checkout, use the link command under [Development](#development). Do not treat a linked worktree as a published release.
 
-```bash
-omp plugin install 'github:ylang-ylang/omp-lan-rpc#v0.4.0'
-```
+V2 is a breaking upgrade. Before replacing a running v1 installation, finish or query its pending work while that old generation still exists. Then install both the v2 host and consuming client, fully restart OMP, and rediscover instance/generation. V1 is not preserved behind a compatibility mode: v1 routes return HTTP 410 `protocol_upgraded`. Records are memory-only, so never automatically replay a request whose old outcome is uncertain.
 
 Start an ordinary OMP session:
 
@@ -186,47 +191,109 @@ LAN changes save defaults for future sessions and restart only the current liste
 
 ## Client and LAN access
 
-Read complete client help at the default user-install path:
+Read the implemented CLI contract at the default user-install path:
 
 ```bash
 node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs help
 ```
 
-Custom OMP/XDG data roots may use a different plugin path. The client provides `list`, `session`, `send`, `request`, and `config`; `help` includes complete examples. `send` reads message contents from a file, never from command-line arguments.
+Custom OMP/XDG data roots may use a different plugin path. The v2 CLI commands are `list`, `config`, `session`, `send`, `submit`, `request`, `cancel`, `events`, `tools`, `claim`, `result`, `artifacts`, and `download`. `send` reads a bounded message file and declares no caller tools; use `submit --request-file` for a complete request containing tool declarations. Message, request, schema, and tool-result bodies stay out of argv.
 
-### SSH-first discovery demo: provide only the machine IP
+`--wait` is deliberately passive: it polls only the request record for up to 300 seconds by default (86,400 maximum), does not stream events, does not execute caller tools, and does not cancel on timeout. It exits 0 for `completed`, 2 for `failed`/`interrupted`/`cancelled`, and 3 on wait timeout, printing the exact recovery query. A request with declared caller tools needs a concurrent worker using `tools`/`claim`/`result`, or the SDK `run()` pump below; waiting for final completion before servicing a tool call can deadlock until timeout.
 
-The supported discovery prerequisite is an existing SSH account with non-interactive authentication and a previously verified host key. Configure these outside the plugin, using normal OpenSSH configuration (`User`, `Port`, `IdentityFile`, `ProxyJump`, and an SSH agent as needed). An IP alone does not supply credentials or establish trust. The plugin does not install/configure sshd, enroll keys, accept unknown host keys, or change running OMP sessions.
+### Local CLI: native result and event output
 
-**Client language is your choice.** `ssh-demo.mjs` is a Node.js example, not a required SDK. A client can be written in Python, Go, Rust, or any language that can run SSH and parse JSON. For example, Python's `subprocess` can invoke the same remote CLI through system OpenSSH, and `json` can parse the returned session metadata. Preserve SSH host verification, endpoint restrictions and instance/generation checks. A Python client reusing the remote `cli.mjs` does not need local Node.js, but still needs Node >=22 on the remote host. The HTTP/JSON RPC protocol itself imposes no client-language requirement.
-
-From this checkout, run:
+On the OMP host, select a PID-live descriptor. Omitting `--instance` is allowed only when exactly one PID-live instance exists.
 
 ```bash
-node ssh-demo.mjs 192.168.201.231
+export RPC_CLI="$HOME/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs"
+node "$RPC_CLI" list
+export INSTANCE=INSTANCE_UUID_FROM_LIST
+node "$RPC_CLI" session --instance "$INSTANCE"
 ```
 
-From an installation containing the demo:
+Copy that session's positive `generation`, then submit a native request and read its event history:
 
 ```bash
-node ~/.omp/plugins/node_modules/omp-lan-rpc/ssh-demo.mjs 192.168.201.231
+printf '%s\n' 'Reply briefly with one benefit of request-scoped isolation.' > /tmp/lan-rpc-prompt.txt
+node "$RPC_CLI" send --instance "$INSTANCE" \
+  --message-file /tmp/lan-rpc-prompt.txt \
+  --request-id native_demo --response-mode native --wait
+node "$RPC_CLI" events --instance "$INSTANCE" \
+  --request-id native_demo --generation GENERATION_FROM_SESSION --after 0
 ```
 
-The demo uses the system `ssh` client with mandatory host-key verification and batch authentication. It executes the already-installed remote `cli.mjs list`, probes PID-live instances with `session`, displays working directories and busy/queue state, and asks you to select a session. A single reachable session is selected automatically. It then reads the selected session again and checks its original instance ID and generation. No RPC port is supplied by the user or scanned.
+The completed native request record contains the ordered native message array in `result`. The events response separately contains `request.state` and `native` entries; each `native` entry preserves the host event under `data` without text extraction or filtering. Native payload shapes are host-version-dependent, so consumers must accept unknown event types. See [Events and recovery](PROTOCOL.md#events-and-recovery).
 
-This is a **read-only access demo**, not a chat client: it only lists descriptors and performs `GET /v1/session`. It never submits messages, restarts OMP, changes listener settings, or replays requests. For scripted use:
+### SSH-first discovery: machine IP, then selected instance
+
+The SSH prerequisite is an existing account with non-interactive authentication and a previously verified host key. Configure `User`, `Port`, `IdentityFile`, `ProxyJump`, and agents through normal OpenSSH configuration. A literal IP supplies neither credentials nor trust; the plugin never installs/configures sshd, enrolls keys, or accepts an unknown host key.
+
+From this checkout, first discover using only the machine IP, then pin access to one returned UUID:
 
 ```bash
 node ssh-demo.mjs 192.168.201.231 --list
 node ssh-demo.mjs 192.168.201.231 --instance INSTANCE_UUID
-node ssh-demo.mjs --help
 ```
 
-All RPC calls run on the SSH host through its existing CLI; only their JSON results cross SSH. This avoids both local port forwarding/listeners and a new remote service. Remote Node >=22 and the plugin must already be installed. The demo adds standard user and Homebrew runtime directories to the remote non-interactive PATH. For a non-default installation, use `--remote-cli /absolute/remote/path/cli.mjs`; configure `OMP_LAN_RPC_DIR` in the remote SSH environment if the session uses a custom runtime root.
+Running `node ssh-demo.mjs 192.168.201.231` instead selects the only reachable session automatically or prompts when several are reachable. `--list` reports probe failures separately; an unavailable selection is never replaced silently. Use `--remote-cli /absolute/remote/path/cli.mjs` for a non-default remote installation and `--ca /absolute/remote/path/cert.pem` for an HTTPS CA file that remains on the remote machine.
 
-Only loopback endpoints and endpoints matching the supplied machine IP are accessed. For a matching LAN HTTP endpoint, the demo explicitly supplies `--allow-http` to the **remote** CLI, never to a direct-network connection from the client. This supports existing LAN listeners without reconfiguration, but **does not remove their anonymous LAN exposure**. Prefer loopback HTTP for SSH-first operation. Other processes on the remote host can still access anonymous loopback HTTP.
+This discovery demo is read-only: it runs the remote `cli.mjs list` and v2 `session` operation, checks the selected instance and generation again, and never submits work. It invokes system OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`. Only a descriptor's loopback endpoint or an endpoint exactly matching the supplied machine IP may be relayed. SSH failure never falls back to direct networking, and no RPC port is scanned or forwarded.
 
-HTTPS instances still require the remote CLI's existing token and verified certificate trust. Use `--ca /absolute/remote/path/cert.pem` when needed; the file stays remote. SSH does not disable TLS checks or export tokens. Unavailable/stale instances are not silently substituted; `--list` reports probe failures separately. No direct-network fallback occurs on SSH failure. SSH reachability is a client discovery prerequisite, not a new authentication requirement on the existing HTTP API.
+Every later JSON operation and artifact byte stream can use that selected instance through the same existing SSH ingress. The remote host needs the installed plugin and Node.js >=22. The local machine needs Node.js >=22 for the supplied JavaScript demos plus system OpenSSH; it does not need OMP. `OMP_LAN_RPC_DIR`, when customized, belongs in the remote SSH environment. Existing remote HTTPS token files remain remote, TLS and hostname verification remain enabled, and SSH does not repair the security of an anonymously exposed LAN HTTP listener.
+
+### Runnable structured tool, artifact, and native example
+
+`examples/client.mjs` is the end-to-end Node SDK example. After discovery, run it from this checkout with the selected identity; the output path is local and must not already exist:
+
+```bash
+export LAN_RPC_SSH_HOST=192.168.201.231
+export LAN_RPC_INSTANCE=INSTANCE_UUID
+node examples/client.mjs /absolute/local/path/rpc-report.txt
+```
+
+For a custom remote install, set `LAN_RPC_REMOTE_CLI` to its absolute remote `cli.mjs` path. For remote HTTPS, `LAN_RPC_REMOTE_CA` is an absolute CA path on the remote host. The installed example can likewise run as `node ~/.omp/plugins/node_modules/omp-lan-rpc/examples/client.mjs /absolute/local/path/rpc-report.txt`.
+
+The example performs the complete v2 loop rather than treating `--wait` as a callback worker:
+
+1. It reads `session()` and requires structured-result, caller-tool, and artifact capabilities.
+2. It submits `responseMode: "structured"` with an object result schema requiring string `summary` and `artifactId`, plus a declared `lookup_item` tool whose object input requires integer `id` and whose object result requires string `title` and `status`. The accepted dialect is a bounded draft-2020-12 subset: schemas may use acyclic local JSON-Pointer references, but external references, `$id`, anchors/dynamic references, reference cycles, `pattern`, `patternProperties`, and `uniqueItems: true` are rejected rather than ignored. Expanded references, JSON depth, and bytes are bounded; validation reports the first concrete error and does not coerce data. See [Common conventions](PROTOCOL.md#common-conventions).
+3. `client.run()` polls request state, events, and tool calls concurrently. Its `lookup_item` handler receives `{id}` and returns the schema-valid caller-owned data while the SDK claims and renews the lease.
+4. The prompt tells the isolated child to create `report.txt`, register it with native `rpc_artifact`, and submit exactly one schema-valid `rpc_result({result:{summary,artifactId}})`. Assistant prose is never accepted as the structured result.
+5. `client.download(identity, artifactId, outputPath)` transfers the immutable artifact bytes through SSH without a base64 envelope and creates the local output exclusively; partial output is removed on failure.
+6. It then runs a separate `native` request, collects every `event.data` whose type is `native`, and prints both the terminal native result and `nativeEvents`.
+
+The artifact half currently requires Linux and a verified `/proc/self/fd` facility for descriptor-pinned, no-follow source traversal. Consumers must check `session.capabilities.artifacts` before requesting files. When it is false—including current macOS/non-Linux hosts—`rpc_artifact` is not exposed and registration returns `host_unsupported`; native and structured chat without artifacts still work. The supplied example intentionally fails its initial capability check rather than assuming file support.
+
+For an explicit direct connection instead of SSH, the same example accepts:
+
+```bash
+LAN_RPC_ENDPOINT=https://192.0.2.10:9443 \
+LAN_RPC_TOKEN_FILE=/secure/omp.token \
+LAN_RPC_CA_FILE=/secure/server.crt \
+node examples/client.mjs /absolute/local/path/rpc-report.txt
+```
+
+Set `LAN_RPC_ALLOW_HTTP=1` only for a non-loopback anonymous HTTP endpoint after accepting that risk. Direct HTTPS requires `LAN_RPC_TOKEN_FILE`; token and CA paths in direct mode are on the local client machine.
+
+The convenience `sdk.mjs` exports `RpcError`, `RpcClient`, `SshRpcClient`, and `listSshInstances`. Direct clients use `new RpcClient({endpoint, token, ca, allowHttp, timeoutMs})`; SSH clients use `new SshRpcClient({host, instanceId, remoteCli, ca, sshPath})` after `listSshInstances({host, remoteCli, ca, sshPath})`. Both expose `session`, `submit`, `request`, `cancel`, tool-call operations, `events`, `artifacts`, `download`, `downloadTo`, and `run`. A `run` handler is called as `(arguments, {identity, toolCall, signal})`; `onEvent(event)` receives the raw event wrapper; the return value is the terminal request record. This Node SDK is optional: the HTTP/JSON protocol and remote-CLI JSON/binary relay are not client-language-specific.
+
+### V1-to-v2 consumer migration
+
+1. Before upgrading, drain or query v1 work on its original running generation. V1 records cannot be migrated across a listener/session restart.
+2. Upgrade the host and consumer together, restart OMP, call v2 `session`, and pin the newly discovered `instanceId` plus `generation`. Do not reuse an old identity.
+3. Replace every v1 route with `/v2/session` and the `/v2/requests` family. There is no preserved v1 behavior or compatibility flag; v1 routes return HTTP 410 `protocol_upgraded`.
+4. Choose `responseMode` explicitly. Use `native` for unmodified host messages/events. For machine data, provide `resultSchema`, use `structured`, and require the child to call `rpc_result`; do not parse assistant text as an implicit result.
+5. Declare caller tools with input/result schemas and service their calls concurrently, using either SDK `run()` or the CLI `tools`/`claim`/`result` flow. Replace any old callback-free `--wait` assumption; CLI waiting only observes request state.
+6. Register generated files with `rpc_artifact` and retrieve by request identity plus artifact ID. Never expose or accept arbitrary remote file paths.
+7. On an uncertain submit, cancel, claim, or tool-result transport outcome, query the original immutable identity before any retry. Never move the request to a rediscovered generation or automatically replay work.
+
+### Terminal states, cancellation, leases, and artifacts
+
+- Request records finish as immutable `completed`, `failed`, `interrupted`, or `cancelled`. Only `completed` has `result`; the other terminal states carry a structured `error`. Branch on state and machine-readable code, not English wording. Cancellation is idempotent and returns an already-terminal record unchanged. CLI wait timeout is not cancellation. See [Requests and structured results](PROTOCOL.md#requests-and-structured-results) and [Error codes](PROTOCOL.md#error-codes).
+- CLI takeover, host cancellation, session changes, endpoint shutdown, and explicit client cancellation have distinct terminal reasons; already executed side effects are not rolled back. See [Migration and isolation](PROTOCOL.md#migration-and-isolation).
+- A caller-tool lease is permission for one attempt, not exactly-once execution. Renewal repeats the same worker/claim with `renew:true`; expiration can make the call pending for another claim. Keep a durable side-effect ledger keyed by server `toolCallId`, and after an uncertain result response query before executing the handler again. See [Caller-executed native tools](PROTOCOL.md#caller-executed-native-tools).
+- An artifact is an immutable snapshot owned by its request association, not by a separately authenticated end user. Any caller authorized by the transport and request identity can retrieve it; anonymous HTTP has no per-user ownership. Artifacts expire 30 minutes after registration, remain downloadable after terminal completion only until expiry, and do not survive instance shutdown/generation rotation. Wrong request ownership is 404; expired/deleted data is 410 `artifact_expired`. See [Artifact registration and retrieval](PROTOCOL.md#artifact-registration-and-retrieval).
 
 ### HTTPS LAN access (recommended)
 
@@ -274,6 +341,7 @@ node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs send \
   --message-file /absolute/path/prompt.txt --request-id my-request --wait
 node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs request \
   --endpoint http://192.0.2.10:9443 --allow-http \
+  --instance-id INSTANCE_UUID_FROM_SESSION \
   --request-id my-request --generation GENERATION_FROM_SESSION
 ```
 
@@ -281,7 +349,7 @@ Generated recovery/query commands retain `--allow-http` and omit token files for
 
 ### Ports, discovery, and private files
 
-`--port 0` lets each session choose a free port; multiple sessions cannot share the same fixed port. An SSH tunnel can reach the default loopback listener without directly exposing a LAN listener.
+`--port 0` lets each session choose a free internal port; multiple sessions cannot share the same fixed HTTP port. The SSH transport reaches every session through the machine's existing SSH port, including requests, raw events, tool replies and binary artifacts. No RPC port must be exposed or manually provided for this path.
 
 The default configuration/runtime root is `~/.omp/lan-rpc`; override it with `OMP_LAN_RPC_DIR`. Saved `config.json` includes `protocol` (`http` or `https`). Instance metadata lives in `instances/<instance-id>.json`; **only HTTPS** has a matching `.token` file and descriptor `tokenFile`. Directories must be private (0700), and files must be owner-readable and inaccessible to other users (0600/0400). Transfer tokens only over a secure channel such as SSH/SCP. Never commit tokens, TLS private keys, or the runtime directory.
 
@@ -289,21 +357,25 @@ The default configuration/runtime root is `~/.omp/lan-rpc`; override it with `OM
 
 ## Security and protocol boundaries
 
-- This is a message-level HTTP/JSON v1 API, not a full network mapping of OMP's native stdio RPC.
+- This is a request-scoped HTTP/JSON v2 API, not a full network mapping of OMP's native stdio RPC. Native mode preserves the host's native output payloads; structured mode never substitutes parsed assistant text for an explicit result tool call.
 - HTTPS requires both verified TLS and a Bearer token. A token authorizes use of the existing agent and its tools; it is not a sandbox. HTTP has no authentication and grants that control to every reachable caller. Browser-origin requests remain forbidden on both transports.
 - Busy requests queue, and request IDs are deduplicated within one generation. Limits are 64 unfinished requests and 256 request records.
 - Records are memory-only. Exiting, switching sessions, or restarting the listener changes the instance and HTTPS token; managed certificate trust is stable for the same IP.
 - After a lost response, query the original instance/generation before taking further action. Resending the same ID into a new session is not cross-restart exactly-once execution.
 - `/lanrpc stop` closes access but cannot undo tool side effects that have already happened.
+- Request tools and instructions live only in the isolated child. CLI takeover interrupts unfinished RPC work; a body claiming to be CLI cannot change its source. Caller tools are intermediate operations with leases/deadlines, not final results. Artifacts are immutable request-owned snapshots with quotas and expiry, not arbitrary file downloads.
 
 ## Development
 
 ```bash
+npm ci
 omp plugin link /absolute/path/to/omp-lan-rpc
 npm test
 ```
 
-Host loading, `/lanrpc` connection details, inline radar placement, and loopback session access have been verified in real OMP 18.2.6 and 18.8.4 terminals. Other versions are selected by API capability, not assumed compatible from version numbers alone. The standalone client requires Node.js >=22. There are no third-party runtime npm dependencies.
+The status/loader compatibility boundary supports legacy string-key settings and newer registry handles. Host execution is capability-checked; an unsupported host fails explicitly rather than falling back to a parent-session prompt. The standalone client requires Node.js >=22. Ajv is installed as a package dependency for bounded JSON Schema validation; OMP/Pi packages are supplied by the host, not installed as duplicate runtimes.
+
+Verification for this v2 worktree: the complete 82-test suite passes. A real OMP 18.2.6 model turn exercised caller-tool lease/result correction, artifact registration and byte-verified download, explicit structured-result correction, missing-result failure, native messages/events, CLI takeover, and absence of RPC tools/transcript in the subsequent parent turn. Real OMP 18.8.4 independently completed a caller-tool → file → artifact → structured-result workflow using local JSON Schema references, verified artifact bytes/SHA-256 through SSH, and returned native messages/events. A separate real SSH two-instance exercise passed 58 protocol/transport checks with a controlled executor; that test proves SSH routing and binary transfer, not model behavior. Disposable test resources were removed; existing user conversations were not used for these checks.
 
 ### Host API isolation
 
@@ -311,17 +383,19 @@ Host loading, `/lanrpc` connection details, inline radar placement, and loopback
 
 - `host/index.mjs` owns lifecycle subscriptions, command registration, session access, message delivery, timers, dialogs, keyboard handling, and clipboard output.
 - `host/settings.mjs` adapts host settings and native status presets by capability: legacy string-key Settings methods or newer registry handles, and root-exported or TUI-module presets. It uses host-provided modules rather than installing a second OMP/Pi runtime.
+- `host/execution.mjs` owns isolated child construction, exact parent-policy inheritance, version-dependent settings isolation, request-local native tools, native event forwarding, and child-only cancellation/disposal.
 - `status.mjs` receives an injected host interface and owns layout/indicator behavior; controller, server, TLS, and configuration modules do not import or call OMP/Pi APIs.
 
 Version differences must be handled inside `host/`, not spread into the RPC implementation. Unknown settings capabilities fail explicitly instead of silently omitting the indicator. The async extension factory awaits status preparation **before** OMP constructs the native TUI. Updating the adapter must not move this work back to `session_start`, persist layout overrides, or introduce a separate endpoint footer.
 
 ## Unreleased
 
-- Document authenticated, host-verified SSH as the default prerequisite for cross-machine discovery; retain explicit direct LAN access and the existing v1 API unchanged.
+- Add protocol v2 with selectable native messages/events or schema-validated `rpc_result`, isolated RPC execution and CLI takeover, caller-executed native tool callbacks, and controlled file artifacts. V1 clients must migrate explicitly; transport security remains unchanged.
 - Include `ssh-demo.mjs`: IP-only, read-only session discovery and selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and instance/generation checks; never fall back to direct networking.
 - Isolate OMP/Pi integration under `host/` and adapt both legacy settings methods and newer registry handles. Fix extension loading on OMP 18.8.4 (`settings.get is not a function`) while keeping native inline radar placement.
+- Match the SDK custom-tool execution signature and embed the caller's result schema in native `rpc_result` parameters with correctly rebased local references. Keep independent controller validation, preserve boolean schemas and annotations, and cover the modern OMP structured-result path with regression and live-host checks.
 
-## v0.4.0
+## Historical v0.4.0 (protocol v1)
 
 - Anonymous HTTP on loopback and LAN, with explicit no-authentication warnings and non-loopback client consent. HTTP never creates, reads, requires, or transmits a token.
 - Automatic private, IP-matching self-signed HTTPS certificates, stable across listener restarts. HTTPS retains mandatory verified TLS and Bearer authentication; clients explicitly trust the certificate with `--ca` or their trust store.

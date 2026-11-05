@@ -1,15 +1,21 @@
+import { randomUUID } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
 import { RequestController } from '../controller.mjs';
-import { isLoopbackHost, readConfig, writeConfig } from '../config.mjs';
+import { isLoopbackHost, readConfig, rootDir, writeConfig } from '../config.mjs';
 import { startServer } from '../server.mjs';
 import { StatusIndicator } from '../status.mjs';
-import { matchesKey } from '@oh-my-pi/pi-tui';
+import { isKeyRelease, matchesKey } from '@oh-my-pi/pi-tui';
+import { ArtifactStore } from '../artifacts.mjs';
 import { prepareTls } from '../tls.mjs';
+import { createRequestExecutor, isLanRpcChildConstruction } from './execution.mjs';
 import { StatusSettings } from './settings.mjs';
 
 // HTTPS token holders, or anyone reaching HTTP, can drive the agent and its tools.
 export default async function lanRpc(pi) {
+  // A request child rebinds the parent's extension policy hooks. It must not
+  // recursively install this endpoint even if an older host misses our path filter.
+  if (isLanRpcChildConstruction()) return;
   const indicator = new StatusIndicator({
     loadSettings: () => StatusSettings.load(pi.pi),
     hasUI: ctx => ctx.hasUI,
@@ -19,6 +25,7 @@ export default async function lanRpc(pi) {
   let server;
   let timer;
   let timerContext;
+  let terminalInputUnsubscribe;
   let changing = false;
   let serial = Promise.resolve();
 
@@ -33,41 +40,59 @@ export default async function lanRpc(pi) {
     return isLoopbackHost(host) ? 'local' : 'lan';
   }
 
-  async function stop(ctx) {
+  async function stop(ctx, code = 'endpoint_closed', message) {
     if (timer) timerContext.clearTimer(timer);
     timer = undefined;
-    controller?.close();
+    timerContext = undefined;
+    terminalInputUnsubscribe?.();
+    terminalInputUnsubscribe = undefined;
+
+    const previousController = controller;
+    const previousServer = server;
     controller = undefined;
-    const previous = server;
     server = undefined;
-    await previous?.close();
+    // close() interrupts synchronously before its returned promise waits for the
+    // child, so no request can remain queued while the listener is being removed.
+    const controllerClosing = previousController?.close(code, message);
+    const closing = [previousServer?.close(), controllerClosing].filter(Boolean);
+    const outcomes = await Promise.allSettled(closing);
+    const rejected = outcomes.find(outcome => outcome.status === 'rejected');
+    const closeError = rejected?.reason;
     indicator.set(ctx, 'off');
+    if (closeError) throw closeError;
   }
 
   async function start(ctx) {
     await indicator.activate(ctx);
     await stop(ctx);
-    const current = new RequestController({
-      sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
-      isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages(),
-      deliver: message => pi.sendMessage(message, { deliverAs: 'followUp', triggerTurn: true }),
-    });
-    controller = current;
+    const instanceId = randomUUID();
+    const artifactStore = new ArtifactStore({ root: rootDir(), instanceId, cwd: ctx.cwd });
+    let current;
     try {
-      server = await startServer({
-        getSession: () => current.session(),
-        submit: request => {
-          if (changing) {
-            throw Object.assign(new Error('Listener configuration is changing'), { status: 503, code: 'reconfiguring' });
-          }
-          if (ctx.sessionManager.getSessionId() !== current.sessionId) {
-            throw Object.assign(new Error('Session changed'), { status: 409, code: 'generation_mismatch' });
-          }
-          return current.submit(request);
-        },
-        getRequest: request => current.get(request),
-        onError: error => report(ctx, error),
+      await artifactStore.init();
+      const executor = createRequestExecutor(pi, ctx);
+      current = new RequestController({
+        sessionId: ctx.sessionManager.getSessionId(),
+        cwd: ctx.cwd,
+        isIdle: () => ctx.isIdle(),
+        hasPendingMessages: () => ctx.hasPendingMessages(),
+        execute: executor.execute,
+        artifactStore,
+        instanceId,
+        reservedToolNames: executor.reservedToolNames,
+        supported: executor.supported,
       });
+      controller = current;
+      server = await startServer({ controller: current, onError: error => report(ctx, error) });
+      if (ctx.hasUI) {
+        terminalInputUnsubscribe = ctx.ui.onTerminalInput(data => {
+          if (controller !== current || isKeyRelease(data)) return;
+          if (matchesKey(data, 'escape') || matchesKey(data, 'enter')) {
+            current.interrupt('cli_takeover');
+          }
+          // Passive observation only: never consume, replace, or reorder a UI key.
+        });
+      }
       timerContext = ctx;
       timer = ctx.setInterval(() => {
         if (!changing) current.tick();
@@ -77,11 +102,15 @@ export default async function lanRpc(pi) {
     } catch (error) {
       if (timer) timerContext.clearTimer(timer);
       timer = undefined;
-      current.close('Endpoint startup failed');
-      controller = undefined;
+      timerContext = undefined;
+      terminalInputUnsubscribe?.();
+      terminalInputUnsubscribe = undefined;
       const failed = server;
       server = undefined;
-      await failed?.close();
+      if (controller === current) controller = undefined;
+      await failed?.close().catch(() => {});
+      if (current) await current.close('endpoint_closed', 'Endpoint startup failed').catch(() => {});
+      else await artifactStore.close().catch(() => {});
       indicator.set(ctx, 'error');
       throw error;
     }
@@ -113,25 +142,19 @@ export default async function lanRpc(pi) {
   }
   for (const event of ['session_before_switch', 'session_before_branch', 'session_before_tree']) {
     pi.on(event, async (_event, ctx) => {
-      if (controller?.hasWork()) {
-        ctx.ui.notify('LAN RPC has pending requests. Wait for completion or use /lanrpc stop before switching sessions.', 'warning');
-        return { cancel: true };
-      }
-      // The native bar belongs to the TUI process, not to an individual chat.
-      // Keep its prepared layout while rotating the session-owned listener.
-      await schedule(() => stop(ctx));
+      // A successful transition gets a fresh controller identity in its after-event.
+      // Cancel first, before any async listener shutdown can yield.
+      controller?.interrupt('session_changed');
+      await schedule(() => stop(ctx, 'session_changed'));
     });
   }
   pi.on('session_shutdown', (_event, ctx) => schedule(async () => {
     try { await stop(ctx); }
     finally { await indicator.dispose(ctx); }
   }));
-  pi.on('message_start', event => controller?.observe(event.message));
-  pi.on('message_end', event => {
-    controller?.observe(event.message);
-    controller?.assistant(event.message);
+  pi.on('input', event => {
+    if (event.source === 'interactive') controller?.interrupt('cli_takeover');
   });
-  pi.on('agent_end', event => controller?.end(event));
 
 
   async function configureLan(ctx, config, configure) {

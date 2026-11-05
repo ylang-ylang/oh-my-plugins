@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readConfig, writeConfig, listenerConfig } from './config.mjs';
 import { startServer } from './server.mjs';
+import { transportController } from './test-support.mjs';
 
 const execute = promisify(execFile);
 
@@ -28,10 +29,8 @@ test('LAN off keeps saved IP and certificates while exposing only plain loopback
   await writeConfig({ host: '192.0.2.10', port: 0, lanEnabled: false,
     tlsCert: join(root, 'not-installed.crt'), tlsKey: join(root, 'not-installed.key') });
   const saved = await readConfig();
-  const server = await startServer({
-    getSession: () => ({ generation: 1, sessionId: 'fixture', cwd: root, busy: false, queueDepth: 0 }),
-    submit: () => { throw new Error('Not used'); }, getRequest: () => undefined,
-  });
+  const controller = await transportController(t, root);
+  const server = await startServer({ controller });
   try {
     assert.equal(new URL(server.endpoint).hostname, '127.0.0.1');
     assert.equal(new URL(server.endpoint).protocol, 'http:');
@@ -77,24 +76,19 @@ test('anonymous HTTP ignores retained TLS files and preserves browser-origin rej
   const root = await fixture(t);
   await writeConfig({ host: '127.0.0.1', port: 0, protocol: 'http',
     tlsCert: join(root, 'missing.crt'), tlsKey: join(root, 'missing.key') });
-  const server = await startServer({
-    getSession: () => ({ generation: 1, sessionId: 'http', cwd: root, busy: false, queueDepth: 0 }),
-    submit: () => { throw new Error('Not used'); }, getRequest: () => undefined,
-  });
+  const controller = await transportController(t, root, 'http');
+  const server = await startServer({ controller });
   try {
     assert.equal(new URL(server.endpoint).protocol, 'http:');
-    assert.equal((await fetch(server.endpoint + '/v1/session')).status, 200);
-    assert.equal((await fetch(server.endpoint + '/v1/session', {
+    assert.equal((await fetch(server.endpoint + '/v2/session')).status, 200);
+    assert.equal((await fetch(server.endpoint + '/v2/session', {
       headers: { Origin: 'https://attacker.invalid' },
     })).status, 403);
     const saved = await readConfig();
     assert.equal(saved.tlsCert, join(root, 'missing.crt'));
     await writeConfig({ ...saved, protocol: 'https' });
   } finally { await server.close(); }
-  await assert.rejects(startServer({
-    getSession: () => ({ generation: 1, sessionId: 'https', cwd: root, busy: false, queueDepth: 0 }),
-    submit: () => {}, getRequest: () => undefined,
-  }), { code: 'ENOENT' });
+  await assert.rejects(startServer({ controller }), { code: 'ENOENT' });
 });
 
 test('CLI LAN transition defaults to HTTPS and plaintext requires an explicit protocol', async t => {

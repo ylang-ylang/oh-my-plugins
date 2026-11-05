@@ -7,26 +7,31 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { listenerConfig, readConfig, rootDir } from "./config.mjs";
+import {
+  ID_PATTERN,
+  LIMITS,
+  PROTOCOL_VERSION,
+  UUID_PATTERN,
+  failure,
+  validateId,
+  validateIdentity,
+} from "./protocol.mjs";
 import { prepareTls } from "./tls.mjs";
 
-const PROTOCOL_VERSION = 1;
-const MAX_BODY_BYTES = 64 * 1024;
 const BODY_TIMEOUT_MS = 15_000;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const TOOL_RESULT_BODY_BYTES = LIMITS.resultBytes + LIMITS.requestBytes;
+const MAX_JSON_RESPONSE_BYTES = Math.max(
+  LIMITS.nativeBytes,
+  LIMITS.toolCalls * (LIMITS.argumentBytes + LIMITS.resultBytes),
+) + LIMITS.requestBytes;
 const ERROR_CODE_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
-
-class HttpError extends Error {
-  constructor(status, code, message, options = undefined) {
-    super(message, options);
-    this.status = status;
-    this.code = code;
-  }
-}
+const SENSITIVE_DETAIL_KEY = /^(?:apiKey|authorization|cause|credential|credentials|file|filename|password|providerRequest|secret|source|sourcePath|stack|token)$/i;
 
 function currentUid() {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
@@ -101,9 +106,12 @@ async function writeDescriptorAtomic(path, descriptor) {
   }
 }
 
-function normalizedSession(value) {
+function normalizedSession(value, instanceId) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError("getSession() must return an object");
+    throw new TypeError("controller.session() must return an object");
+  }
+  if (value.protocolVersion !== PROTOCOL_VERSION || value.instanceId !== instanceId) {
+    throw new TypeError("controller session identity does not match the listener");
   }
   if (!Number.isSafeInteger(value.generation) || value.generation <= 0) {
     throw new TypeError("session generation must be a positive safe integer");
@@ -120,12 +128,28 @@ function normalizedSession(value) {
   if (!Number.isSafeInteger(value.queueDepth) || value.queueDepth < 0) {
     throw new TypeError("session queueDepth must be a non-negative safe integer");
   }
+  const capabilities = value.capabilities;
+  if (capabilities === null || typeof capabilities !== "object" || Array.isArray(capabilities) ||
+      typeof capabilities.structuredResults !== "boolean" ||
+      typeof capabilities.callerTools !== "boolean" ||
+      typeof capabilities.artifacts !== "boolean" ||
+      typeof capabilities.isolatedExecution !== "boolean") {
+    throw new TypeError("session capabilities are invalid");
+  }
   return {
+    protocolVersion: PROTOCOL_VERSION,
+    instanceId,
     generation: value.generation,
     sessionId: value.sessionId,
     cwd: value.cwd,
     busy: value.busy,
     queueDepth: value.queueDepth,
+    capabilities: {
+      structuredResults: capabilities.structuredResults,
+      callerTools: capabilities.callerTools,
+      artifacts: capabilities.artifacts,
+      isolatedExecution: capabilities.isolatedExecution,
+    },
   };
 }
 
@@ -135,31 +159,42 @@ function invokeSync(callback, argument, name) {
       (typeof value === "object" || typeof value === "function") &&
       typeof value.then === "function") {
     void Promise.resolve(value).catch(() => {});
-    throw new TypeError(`${name} callback must be synchronous`);
+    throw new TypeError(`${name} must be synchronous`);
   }
   return value;
 }
 
 function parseGeneration(value) {
   if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) {
-    throw new HttpError(400, "invalid_generation", "generation must be a positive integer");
+    throw failure(400, "invalid_identity", "generation must be a positive safe integer");
   }
   const generation = Number(value);
   if (!Number.isSafeInteger(generation)) {
-    throw new HttpError(400, "invalid_generation", "generation exceeds the safe integer range");
+    throw failure(400, "invalid_identity", "generation must be a positive safe integer");
   }
   return generation;
 }
 
-function parseRequestId(value) {
-  if (typeof value !== "string" || !REQUEST_ID_PATTERN.test(value)) {
-    throw new HttpError(
-      400,
-      "invalid_request_id",
-      "requestId must match [A-Za-z0-9_-]{1,128}",
-    );
+function decodePathId(value, label, pattern, code) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    throw failure(400, code, `${label} is not valid URL encoding`);
   }
-  return value;
+  if (!pattern.test(decoded)) {
+    throw failure(400, code, `${label} is invalid`);
+  }
+  return decoded;
+}
+
+function parseRequestId(value) {
+  const requestId = decodePathId(value, "requestId", ID_PATTERN, "invalid_request_id");
+  return validateId(requestId);
+}
+
+function parseUuidId(value, label, code = "invalid_request") {
+  return decodePathId(value, label, UUID_PATTERN, code);
 }
 
 function discardRequest(req) {
@@ -167,13 +202,16 @@ function discardRequest(req) {
 }
 
 function responsePayload(value) {
+  let body;
   try {
-    return Buffer.from(JSON.stringify(value), "utf8");
-  } catch (error) {
-    throw new HttpError(500, "serialization_error", "response could not be serialized", {
-      cause: error,
-    });
+    body = Buffer.from(JSON.stringify(value), "utf8");
+  } catch {
+    throw failure(500, "internal_error", "internal server error");
   }
+  if (body.byteLength > MAX_JSON_RESPONSE_BYTES) {
+    throw failure(500, "internal_error", "internal server error");
+  }
+  return body;
 }
 
 function sendJson(req, res, status, value, headers = undefined) {
@@ -190,8 +228,10 @@ function sendJson(req, res, status, value, headers = undefined) {
   discardRequest(req);
 }
 
-function sendError(req, res, status, code, message, headers = undefined) {
-  sendJson(req, res, status, { error: { code, message } }, headers);
+function sendError(req, res, status, code, message, headers = undefined, details = undefined) {
+  const error = { code, message };
+  if (details !== undefined) error.details = details;
+  sendJson(req, res, status, { error }, headers);
 }
 
 function hasSingleBearerToken(req, expectedDigest) {
@@ -210,14 +250,14 @@ function hasSingleBearerToken(req, expectedDigest) {
   return timingSafeEqual(expectedDigest, candidateDigest);
 }
 
-function readBody(req) {
+function readBody(req, maxBytes) {
   const contentLength = req.headers["content-length"];
   if (contentLength !== undefined) {
     if (!/^[0-9]+$/.test(contentLength)) {
-      throw new HttpError(400, "invalid_content_length", "Content-Length is invalid");
+      throw failure(400, "invalid_request", "Content-Length is invalid");
     }
-    if (Number(contentLength) > MAX_BODY_BYTES) {
-      throw new HttpError(413, "payload_too_large", "request body exceeds 64 KiB");
+    if (Number(contentLength) > maxBytes) {
+      throw failure(413, "body_too_large", "request body exceeds the route limit");
     }
   }
 
@@ -242,8 +282,8 @@ function readBody(req) {
     };
     const onData = (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        fail(new HttpError(413, "payload_too_large", "request body exceeds 64 KiB"));
+      if (size > maxBytes) {
+        fail(failure(413, "body_too_large", "request body exceeds the route limit"));
         return;
       }
       chunks.push(chunk);
@@ -255,11 +295,11 @@ function readBody(req) {
       resolve(Buffer.concat(chunks, size));
     };
     const onAborted = () => {
-      fail(new HttpError(400, "request_aborted", "request body was aborted"));
+      fail(failure(400, "invalid_request", "request body was aborted"));
     };
     const onError = (error) => fail(error);
     const timer = setTimeout(() => {
-      fail(new HttpError(408, "request_timeout", "request body timed out"));
+      fail(failure(408, "request_timeout", "request body timed out"));
     }, BODY_TIMEOUT_MS);
     timer.unref?.();
 
@@ -270,58 +310,217 @@ function readBody(req) {
   });
 }
 
-async function readJsonBody(req) {
+async function readJsonBody(req, maxBytes = LIMITS.requestBytes) {
   const contentType = req.headers["content-type"];
   if (typeof contentType !== "string" ||
       contentType.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
-    throw new HttpError(415, "unsupported_media_type", "Content-Type must be application/json");
+    throw failure(415, "unsupported_media_type", "Content-Type must be application/json");
   }
 
-  const body = await readBody(req);
+  const body = await readBody(req, maxBytes);
   let value;
   try {
     value = JSON.parse(body.toString("utf8"));
   } catch {
-    throw new HttpError(400, "invalid_json", "request body is not valid JSON");
+    throw failure(400, "invalid_json", "request body is not valid JSON");
   }
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new HttpError(400, "invalid_request", "request body must be a JSON object");
+    throw failure(400, "invalid_request", "request body must be a JSON object");
   }
   return value;
 }
 
+const UNSAFE_DETAIL = Symbol("unsafe detail");
+
+function sanitizeDetail(value, depth = 0) {
+  if (depth > LIMITS.jsonDepth) return UNSAFE_DETAIL;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") return Buffer.byteLength(value, "utf8") <= LIMITS.requestBytes ? value : UNSAFE_DETAIL;
+  if (typeof value === "number") return Number.isFinite(value) ? value : UNSAFE_DETAIL;
+  if (Array.isArray(value)) {
+    if (value.length > 1024) return UNSAFE_DETAIL;
+    const result = [];
+    for (const item of value) {
+      const safe = sanitizeDetail(item, depth + 1);
+      if (safe === UNSAFE_DETAIL) return UNSAFE_DETAIL;
+      result.push(safe);
+    }
+    return result;
+  }
+  if (typeof value !== "object" || value instanceof Error) return UNSAFE_DETAIL;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return UNSAFE_DETAIL;
+  const entries = Object.entries(value);
+  if (entries.length > 64) return UNSAFE_DETAIL;
+  const result = Object.create(null);
+  for (const [key, item] of entries) {
+    if (SENSITIVE_DETAIL_KEY.test(key)) continue;
+    const safe = sanitizeDetail(item, depth + 1);
+    if (safe === UNSAFE_DETAIL) return UNSAFE_DETAIL;
+    result[key] = safe;
+  }
+  return result;
+}
+
+function safeErrorDetails(details) {
+  if (details === undefined) return undefined;
+  let safe;
+  try {
+    safe = sanitizeDetail(details);
+  } catch {
+    return undefined;
+  }
+  if (safe === UNSAFE_DETAIL) return undefined;
+  try {
+    if (Buffer.byteLength(JSON.stringify(safe), "utf8") > LIMITS.requestBytes) return undefined;
+  } catch {
+    return undefined;
+  }
+  return safe;
+}
+
 function errorDetails(error) {
-  const status = error?.status;
-  const code = error?.code;
-  if (Number.isInteger(status) && status >= 400 && status <= 599 &&
-      typeof code === "string" && ERROR_CODE_PATTERN.test(code)) {
-    return {
-      status,
-      code,
-      message: typeof error.message === "string" && error.message.length > 0
+  try {
+    const status = error?.status;
+    const code = error?.code;
+    if (Number.isInteger(status) && status >= 400 && status <= 599 &&
+        typeof code === "string" && ERROR_CODE_PATTERN.test(code)) {
+      const message = typeof error.message === "string" && error.message.length > 0 && error.message.length <= 2048
         ? error.message
-        : "request failed",
-      report: status >= 500,
-    };
+        : "request failed";
+      return {
+        status,
+        code,
+        message,
+        details: safeErrorDetails(error.details),
+        report: status >= 500,
+      };
+    }
+  } catch {
+    // Untrusted thrown values are never inspected further or returned.
   }
   return {
     status: 500,
     code: "internal_error",
     message: "internal server error",
+    details: undefined,
     report: true,
   };
 }
 
-function validateQuery(url, expectedKeys) {
+function validateQuery(url, requiredKeys, optionalKeys = []) {
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
   const actual = [...url.searchParams.keys()];
-  if (actual.some((key) => !expectedKeys.includes(key))) {
-    throw new HttpError(400, "invalid_query", "query contains an unsupported parameter");
+  if (actual.some((key) => !allowed.has(key))) {
+    throw failure(400, "invalid_query", "query contains an unsupported parameter");
   }
-  for (const key of expectedKeys) {
+  for (const key of requiredKeys) {
     if (url.searchParams.getAll(key).length !== 1) {
-      throw new HttpError(400, "invalid_query", `query must contain exactly one ${key}`);
+      throw failure(400, "invalid_query", `query must contain exactly one ${key}`);
     }
   }
+  for (const key of optionalKeys) {
+    if (url.searchParams.getAll(key).length > 1) {
+      throw failure(400, "invalid_query", `query may contain at most one ${key}`);
+    }
+  }
+}
+
+function queryIdentity(url, optionalKeys = []) {
+  validateQuery(url, ["instanceId", "generation"], optionalKeys);
+  const identity = {
+    instanceId: url.searchParams.get("instanceId"),
+    generation: parseGeneration(url.searchParams.get("generation")),
+  };
+  validateIdentity(identity);
+  return identity;
+}
+
+function bodyIdentity(body, allowedKeys, requiredKeys = ["instanceId", "generation"]) {
+  const allowed = new Set(allowedKeys);
+  if (Object.keys(body).some((key) => !allowed.has(key)) ||
+      requiredKeys.some((key) => !Object.hasOwn(body, key))) {
+    throw failure(400, "invalid_request", "request body has missing or unsupported fields");
+  }
+  const identity = { instanceId: body.instanceId, generation: body.generation };
+  validateIdentity(identity);
+  return identity;
+}
+
+function parseAfter(value) {
+  if (value === null) return 0;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw failure(400, "invalid_query", "after must be a non-negative safe integer");
+  }
+  const after = Number(value);
+  if (!Number.isSafeInteger(after)) {
+    throw failure(400, "invalid_query", "after must be a non-negative safe integer");
+  }
+  return after;
+}
+
+function requireMethod(req, res, method) {
+  if (req.method === method) return true;
+  sendError(req, res, 405, "method_not_allowed", "method is not allowed", { Allow: method });
+  return false;
+}
+
+function contentDisposition(name) {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_") || "download";
+  const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+async function sendArtifact(req, res, value) {
+  const metadata = value?.metadata;
+  const handle = value?.handle;
+  if (typeof handle?.createReadStream !== "function" || typeof handle?.close !== "function" ||
+      typeof handle?.stat !== "function") {
+    throw failure(500, "internal_error", "internal server error");
+  }
+
+  let streamError;
+  try {
+    if (!metadata || typeof metadata.name !== "string" || metadata.name.length === 0 ||
+        Buffer.byteLength(metadata.name, "utf8") > 1024 || /[\r\n]/.test(metadata.name) ||
+        typeof metadata.mediaType !== "string" || metadata.mediaType.length > 255 ||
+        !/^[A-Za-z0-9!#$%&'*+.^_\x60|~-]+\/[A-Za-z0-9!#$%&'*+.^_\x60|~-]+$/.test(metadata.mediaType) ||
+        !Number.isSafeInteger(metadata.size) || metadata.size < 0 || metadata.size > LIMITS.artifactBytes) {
+      throw failure(500, "internal_error", "internal server error");
+    }
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size !== metadata.size) {
+      throw failure(500, "internal_error", "internal server error");
+    }
+    const stream = metadata.size === 0
+      ? undefined
+      : handle.createReadStream({ autoClose: false, start: 0, end: metadata.size - 1 });
+    res.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Disposition": contentDisposition(metadata.name),
+      "Content-Length": metadata.size,
+      "Content-Type": metadata.mediaType,
+      "X-Content-Type-Options": "nosniff",
+    });
+    discardRequest(req);
+    if (stream === undefined) {
+      res.end();
+    } else {
+      try {
+        await pipeline(stream, res);
+      } catch (error) {
+        if (!req.aborted && !req.destroyed) streamError = error;
+      }
+    }
+  } finally {
+    try {
+      await handle.close();
+    } catch (error) {
+      streamError ??= error;
+    }
+  }
+  if (streamError !== undefined) throw streamError;
 }
 
 async function routeRequest(req, res, context) {
@@ -340,71 +539,120 @@ async function routeRequest(req, res, context) {
   try {
     url = new URL(req.url ?? "", "http://localhost");
   } catch {
-    throw new HttpError(400, "invalid_url", "request URL is invalid");
+    throw failure(400, "invalid_request", "request URL is invalid");
   }
 
-  if (url.pathname === "/v1/session") {
-    if (req.method !== "GET") {
-      sendError(req, res, 405, "method_not_allowed", "method is not allowed", { Allow: "GET" });
-      return;
-    }
-    validateQuery(url, []);
-    const session = normalizedSession(invokeSync(context.getSession, undefined, "getSession"));
-    sendJson(req, res, 200, {
-      protocolVersion: PROTOCOL_VERSION,
-      instanceId: context.instanceId,
-      ...session,
-    });
+  if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) {
+    sendError(req, res, 410, "protocol_upgraded", "protocol v1 has been replaced by v2");
     return;
   }
 
-  if (url.pathname === "/v1/requests") {
-    if (req.method !== "POST") {
-      sendError(req, res, 405, "method_not_allowed", "method is not allowed", { Allow: "POST" });
-      return;
-    }
+  const controller = context.controller;
+  const invoke = (name, argument) => invokeSync(
+    controller[name].bind(controller),
+    argument,
+    `controller.${name}()`,
+  );
+
+  if (url.pathname === "/v2/session") {
+    if (!requireMethod(req, res, "GET")) return;
+    validateQuery(url, []);
+    sendJson(req, res, 200, normalizedSession(invoke("session"), context.instanceId));
+    return;
+  }
+
+  if (url.pathname === "/v2/requests") {
+    if (!requireMethod(req, res, "POST")) return;
     validateQuery(url, []);
     const body = await readJsonBody(req);
-    const keys = Object.keys(body);
-    if (keys.some((key) => !["generation", "requestId", "message"].includes(key))) {
-      throw new HttpError(400, "invalid_request", "request body contains an unsupported field");
-    }
-    if (!Number.isSafeInteger(body.generation) || body.generation <= 0) {
-      throw new HttpError(400, "invalid_generation", "generation must be a positive safe integer");
-    }
-    const requestId = parseRequestId(body.requestId);
-    if (typeof body.message !== "string") {
-      throw new HttpError(400, "invalid_message", "message must be a string");
-    }
-    const record = invokeSync(context.submit, {
-      generation: body.generation,
-      requestId,
-      message: body.message,
-    }, "submit");
-    sendJson(req, res, 202, record);
+    bodyIdentity(body,
+      ["instanceId", "generation", "requestId", "message", "responseMode", "resultSchema", "tools", "timeoutMs", "toolTimeoutMs"],
+      ["instanceId", "generation", "requestId", "message"]);
+    validateId(body.requestId);
+    sendJson(req, res, 202, invoke("submit", body));
     return;
   }
 
-  const match = /^\/v1\/requests\/([^/]+)$/.exec(url.pathname);
-  if (match !== null) {
-    if (req.method !== "GET") {
-      sendError(req, res, 405, "method_not_allowed", "method is not allowed", { Allow: "GET" });
+  const segments = url.pathname.split("/");
+  if (segments.length < 4 || segments[0] !== "" || segments[1] !== "v2" || segments[2] !== "requests") {
+    sendError(req, res, 404, "not_found", "route was not found");
+    return;
+  }
+  const requestId = parseRequestId(segments[3]);
+
+  if (segments.length === 4) {
+    if (!requireMethod(req, res, "GET")) return;
+    const identity = { ...queryIdentity(url), requestId };
+    sendJson(req, res, 200, invoke("get", identity));
+    return;
+  }
+
+  if (segments.length === 5 && segments[4] === "cancel") {
+    if (!requireMethod(req, res, "POST")) return;
+    validateQuery(url, []);
+    const body = await readJsonBody(req);
+    const identity = bodyIdentity(body, ["instanceId", "generation"]);
+    sendJson(req, res, 200, invoke("cancel", { ...identity, requestId }));
+    return;
+  }
+
+  if (segments.length === 5 && segments[4] === "events") {
+    if (!requireMethod(req, res, "GET")) return;
+    const identity = queryIdentity(url, ["after"]);
+    const after = parseAfter(url.searchParams.get("after"));
+    sendJson(req, res, 200, invoke("events", { ...identity, requestId, after }));
+    return;
+  }
+
+  if (segments.length === 5 && segments[4] === "tool-calls") {
+    if (!requireMethod(req, res, "GET")) return;
+    const identity = { ...queryIdentity(url), requestId };
+    sendJson(req, res, 200, invoke("toolCalls", identity));
+    return;
+  }
+
+  if (segments.length >= 6 && segments[4] === "tool-calls") {
+    const toolCallId = parseUuidId(segments[5], "toolCallId");
+    if (segments.length === 6) {
+      if (!requireMethod(req, res, "GET")) return;
+      const identity = { ...queryIdentity(url), requestId, toolCallId };
+      sendJson(req, res, 200, invoke("toolCall", identity));
       return;
     }
-    validateQuery(url, ["generation"]);
-    let decodedId;
-    try {
-      decodedId = decodeURIComponent(match[1]);
-    } catch {
-      throw new HttpError(400, "invalid_request_id", "requestId is not valid URL encoding");
+    if (segments.length === 7 && segments[6] === "claim") {
+      if (!requireMethod(req, res, "POST")) return;
+      validateQuery(url, []);
+      const body = await readJsonBody(req);
+      const identity = bodyIdentity(body,
+        ["instanceId", "generation", "workerId", "claimId", "leaseMs", "renew"],
+        ["instanceId", "generation", "workerId", "claimId"]);
+      sendJson(req, res, 200, invoke("claim", { ...body, ...identity, requestId, toolCallId }));
+      return;
     }
-    const requestId = parseRequestId(decodedId);
-    const generation = parseGeneration(url.searchParams.get("generation"));
-    const record = invokeSync(context.getRequest, { generation, requestId }, "getRequest");
-    if (record === undefined || record === null) {
-      throw new HttpError(404, "request_not_found", "request was not found");
+    if (segments.length === 7 && segments[6] === "result") {
+      if (!requireMethod(req, res, "POST")) return;
+      validateQuery(url, []);
+      const body = await readJsonBody(req, TOOL_RESULT_BODY_BYTES);
+      const identity = bodyIdentity(body,
+        ["instanceId", "generation", "leaseId", "outcome"],
+        ["instanceId", "generation", "leaseId", "outcome"]);
+      sendJson(req, res, 200, invoke("toolResult", { ...body, ...identity, requestId, toolCallId }));
+      return;
     }
-    sendJson(req, res, 200, record);
+  }
+
+  if (segments.length === 5 && segments[4] === "artifacts") {
+    if (!requireMethod(req, res, "GET")) return;
+    const identity = { ...queryIdentity(url), requestId };
+    sendJson(req, res, 200, invoke("artifacts", identity));
+    return;
+  }
+
+  if (segments.length === 6 && segments[4] === "artifacts") {
+    if (!requireMethod(req, res, "GET")) return;
+    const artifactId = parseUuidId(segments[5], "artifactId", "invalid_artifact");
+    const identity = { ...queryIdentity(url), requestId, artifactId };
+    await sendArtifact(req, res, await controller.artifact(identity));
     return;
   }
 
@@ -460,11 +708,15 @@ function endpointFor(protocol, host, port) {
   return `${protocol}://${authorityHost}:${port}`;
 }
 
-export async function startServer({ getSession, submit, getRequest, onError } = {}) {
-  if (typeof getSession !== "function" ||
-      typeof submit !== "function" ||
-      typeof getRequest !== "function") {
-    throw new TypeError("getSession, submit, and getRequest callbacks are required");
+export async function startServer({ controller, onError } = {}) {
+  const requiredMethods = [
+    "session", "submit", "get", "cancel", "events", "toolCalls", "toolCall",
+    "claim", "toolResult", "artifacts", "artifact",
+  ];
+  if (controller === null || typeof controller !== "object" ||
+      !UUID_PATTERN.test(controller.instanceId ?? "") ||
+      requiredMethods.some((name) => typeof controller[name] !== "function")) {
+    throw new TypeError("a v2 RequestController is required");
   }
   if (onError !== undefined && typeof onError !== "function") {
     throw new TypeError("onError must be a function when provided");
@@ -479,7 +731,7 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
   await ensurePrivateDirectory(directory);
   await ensurePrivateDirectory(instances);
 
-  const instanceId = randomUUID();
+  const instanceId = controller.instanceId;
   const token = tls ? randomBytes(32).toString("base64url") : undefined;
   const tokenDigest = token === undefined ? undefined : createHash("sha256").update(token, "utf8").digest();
   const tokenFile = tls ? join(instances, `${instanceId}.token`) : undefined;
@@ -495,11 +747,9 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
     }
 
     const context = {
+      controller,
       instanceId,
       tokenDigest,
-      getSession,
-      submit,
-      getRequest,
     };
     const handler = (req, res) => {
       // Socket failures are peer-controlled and must not become uncaught EventEmitter errors.
@@ -512,7 +762,8 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
           sendError(req, res, details.status, details.code, details.message,
             details.status === 408 || details.status === 413
               ? { Connection: "close" }
-              : undefined);
+              : undefined,
+            details.details);
         } catch (responseError) {
           safeReport(onError, responseError);
           res.destroy();
@@ -550,11 +801,12 @@ export async function startServer({ getSession, submit, getRequest, onError } = 
       throw new Error("LAN RPC server did not bind a TCP address");
     }
     const endpoint = endpointFor(tls === undefined ? "http" : "https", config.host, address.port);
-    const session = normalizedSession(invokeSync(getSession, undefined, "getSession"));
+    const session = normalizedSession(invokeSync(controller.session.bind(controller), undefined, "controller.session()"), instanceId);
     await writeDescriptorAtomic(descriptorFile, {
       instanceId,
       pid: process.pid,
       endpoint,
+      protocolVersion: PROTOCOL_VERSION,
       tokenFile,
       generation: session.generation,
       sessionId: session.sessionId,

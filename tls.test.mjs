@@ -7,6 +7,7 @@ import { X509Certificate } from 'node:crypto';
 import { prepareTls } from './tls.mjs';
 import { startServer } from './server.mjs';
 import { writeConfig } from './config.mjs';
+import { transportController } from './test-support.mjs';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'omp-managed-tls-'));
@@ -24,14 +25,12 @@ test('managed HTTPS has a matching SAN, private files, stable restart trust, and
   const root = await fixture(t);
   const config = { host: '127.0.0.1', port: 0, protocol: 'https' };
   await writeConfig(config);
-  const callbacks = { getSession: () => ({ generation: 1, sessionId: 'tls', cwd: root, busy: false, queueDepth: 0 }),
-    submit: () => {}, getRequest: () => undefined };
-  const first = await startServer(callbacks);
+  const first = await startServer({ controller: await transportController(t, root, 'tls') });
   const certFile = first.certFile;
   const certificate = new X509Certificate(await readFile(certFile));
   const originalToken = first.token;
   await first.close();
-  const second = await startServer(callbacks);
+  const second = await startServer({ controller: await transportController(t, root, 'tls') });
   try {
     assert.equal(new X509Certificate(await readFile(second.certFile)).fingerprint256, certificate.fingerprint256);
     assert.ok(second.token !== originalToken);
