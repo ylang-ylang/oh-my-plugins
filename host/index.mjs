@@ -240,8 +240,8 @@ export default async function lanRpc(pi) {
       let text;
       const content = () => [
         'LAN RPC — Connection details', '', current.endpoint,
-        `Instance: ${current.instanceId}`, `Session: ${JSON.stringify(session.sessionId)}`,
-        `Generation: ${session.generation} | Busy: ${session.busy} | Queue: ${session.queueDepth}`,
+        `Session: ${session.sessionId}`,
+        `Busy: ${session.busy} | Queue: ${session.queueDepth}`,
         `Working directory: ${JSON.stringify(session.cwd)}`, '',
         ...(encrypted ? [
           'HTTPS — encrypted; Bearer token authentication required',

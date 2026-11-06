@@ -180,6 +180,8 @@ The default listener uses plain HTTP on **127.0.0.1 only**, with an automaticall
 
 The native status bar shows a small radar rather than an endpoint or token. `/lanrpc info` and menu **Connection details** open a focused panel. HTTPS shows the endpoint, session metadata, certificate path, token file path, and **actual token**. Press **c — Copy token** to send the exact token to the terminal clipboard using OSC 52, including over SSH; your terminal must support and permit clipboard writes (and your multiplexer must allow them). The panel reports that a clipboard request was sent, not that an OS clipboard accepted it. **Esc / Enter** closes the panel and removes the copy hotkey; `c` is never a global chat shortcut. HTTP explicitly shows no authentication and no token. No token is written to logs, status bars, standalone client output, or RPC session metadata. Avoid opening HTTPS details while screen-sharing.
 
+Connection details show the session ID, endpoint, working directory, and busy/queue state. Internal instance UUID and generation are intentionally omitted from this user-facing panel; they remain in the protocol for request identity checks and safe recovery.
+
 All menus, prompts, confirmations, errors, and help are English. The radar uses the Nerd Fonts `md-radar` glyph and OMP's native theme; local/LAN state is distinguished in the menu. Stopped access shows a small circle; an error shows `!`. If the radar looks like a box, select a supporting [Nerd Font](https://www.nerdfonts.com/) in the terminal displaying OMP. With SSH, this is the local client terminal, not the remote server.
 
 - `/lanrpc on`: enables LAN access. First use asks for a specific local IP and port. Choose **HTTPS (recommended)** or **HTTP (unencrypted, NO authentication)**. HTTPS automatically generates/reuses a private self-signed certificate for that IP without asking for paths; previously configured custom TLS paths are preserved. HTTP requires a clear no-authentication/unencrypted-risk confirmation.
@@ -405,6 +407,7 @@ Version differences must be handled inside `host/`, not spread into the RPC impl
 
 ## Unreleased
 
+- Simplify the connection panel to session identity and connection/status details; keep instance/generation safety fields in the protocol, not in the ordinary UI.
 - Add protocol v2 with selectable native messages/events or schema-validated `rpc_result`, isolated RPC execution and CLI takeover, caller-executed native tool callbacks, and controlled file artifacts. V1 clients must migrate explicitly; transport security remains unchanged.
 - Include `ssh-demo.mjs`: IP-only, read-only session discovery and `sessionId` selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and pinned instance/generation checks; never fall back to direct networking.
 - Isolate OMP/Pi integration under `host/` and adapt both legacy settings methods and newer registry handles. Fix extension loading on OMP 18.8.4 (`settings.get is not a function`) while keeping native inline radar placement.
