@@ -358,39 +358,118 @@ test("tool result schema rejection remains an explicit SDK error", async (t) => 
     return true;
   });
 });
-test("SSH transport uses verified BatchMode relay for JSON and raw artifact bytes", async (t) => {
+function sshDescriptor(instanceId, sessionId, generation = 7) {
+  return { instanceId, generation, sessionId, status: "live", pid: 1234, endpoint: "http://127.0.0.1:43120" };
+}
+
+function sshSession(instanceId, sessionId, generation = 7) {
+  return { protocolVersion: 2, instanceId, generation, sessionId, cwd: `/remote/${sessionId}`, busy: false, queueDepth: 0, capabilities: {} };
+}
+
+async function fakeSshFixture(t, initial) {
   const root = await mkdtemp(join(tmpdir(), "lan-rpc-ssh-sdk-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const fakeSsh = join(root, "ssh");
+  const sshPath = join(root, "ssh");
   const capture = join(root, "capture.ndjson");
-  const output = join(root, "artifact.bin");
-  await writeFile(fakeSsh, `#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
+  const scenario = join(root, "scenario.json");
+  await writeFile(scenario, JSON.stringify(initial));
+  await writeFile(sshPath, `#!/usr/bin/env node
+const { appendFileSync, readFileSync } = require("node:fs");
 (async () => {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const input = Buffer.concat(chunks).toString("utf8");
-  appendFileSync(process.env.SSH_CAPTURE, JSON.stringify({ args: process.argv.slice(2), input }) + "\\n");
+  const command = process.argv.at(-1);
+  appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ args: process.argv.slice(2), command, input }) + "\\n");
+  const config = JSON.parse(readFileSync(${JSON.stringify(scenario)}, "utf8"));
+  if (!input) {
+    process.stdout.write(JSON.stringify(config.listing));
+    return;
+  }
   const payload = JSON.parse(input);
-  if (payload.operation === "download") process.stdout.write(Buffer.from([0, 1, 2, 255]));
-  else process.stdout.write(JSON.stringify({ protocolVersion: 2, instanceId: "${INSTANCE}", generation: 7, sessionId: "ssh", cwd: "/remote", busy: false, queueDepth: 0, capabilities: {} }));
+  const instanceId = Object.keys(config.sessions).find((candidate) => command.includes("'" + candidate + "'"));
+  const session = instanceId === undefined ? undefined : config.sessions[instanceId];
+  if (!session) {
+    process.stdout.write(JSON.stringify({ error: { code: "instance_not_found", message: "pinned instance is gone" } }));
+    process.exitCode = 1;
+    return;
+  }
+  if (payload.operation === "download") {
+    process.stdout.write(Buffer.from(config.artifact ?? [0, 1, 2, 255]));
+    return;
+  }
+  if (payload.operation === "session") {
+    process.stdout.write(JSON.stringify(session));
+    return;
+  }
+  const identity = payload.identity ?? payload.request;
+  process.stdout.write(JSON.stringify({ ...identity, sessionId: session.sessionId, responseMode: payload.request?.responseMode ?? "native", state: "running" }));
 })();
 `, { mode: 0o700 });
-  await chmod(fakeSsh, 0o700);
-  const previous = process.env.SSH_CAPTURE;
-  process.env.SSH_CAPTURE = capture;
-  t.after(() => {
-    if (previous === undefined) delete process.env.SSH_CAPTURE;
-    else process.env.SSH_CAPTURE = previous;
-  });
+  await chmod(sshPath, 0o700);
+  return {
+    root,
+    sshPath,
+    async writeState(value) { await writeFile(scenario, JSON.stringify(value)); },
+    async invocations() {
+      try { return (await readFile(capture, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse); }
+      catch (error) { if (error.code === "ENOENT") return []; throw error; }
+    },
+  };
+}
 
-  const client = new SshRpcClient({ host: "192.0.2.44", instanceId: INSTANCE, sshPath: fakeSsh, remoteCli: "/opt/omp cli/cli.mjs" });
-  assert.equal((await client.session()).sessionId, "ssh");
-  await client.download({ instanceId: INSTANCE, generation: 7, requestId: "job" }, ARTIFACT_ID, output);
+test("SSH session selection rejects obsolete selectors, missing sessions, and wrong live metadata", async (t) => {
+  assert.throws(() => new SshRpcClient({ host: "192.0.2.44", instanceId: INSTANCE }), (error) => error.code === "invalid_client_argument");
+  assert.throws(() => new SshRpcClient({ host: "192.0.2.44", sessionId: "" }), (error) => error.code === "invalid_client_argument");
+  assert.throws(() => new SshRpcClient({ host: "unverified-alias", sessionId: "ssh" }), (error) => error.code === "invalid_ssh_host");
+
+  const descriptor = sshDescriptor(INSTANCE, "ssh");
+  const fixture = await fakeSshFixture(t, { listing: { instances: [descriptor] }, sessions: { [INSTANCE]: sshSession(INSTANCE, "ssh") } });
+  const missing = new SshRpcClient({ host: "192.0.2.44", sessionId: "missing", sshPath: fixture.sshPath });
+  await assert.rejects(missing.session(), (error) => error.code === "session_not_found");
+  await assert.rejects(missing.session(), (error) => error.code === "session_not_found");
+  assert.equal((await fixture.invocations()).length, 1);
+
+  await fixture.writeState({ listing: { instances: [descriptor] }, sessions: { [INSTANCE]: sshSession(INSTANCE, "different") } });
+  await assert.rejects(new SshRpcClient({ host: "192.0.2.44", sessionId: "ssh", sshPath: fixture.sshPath }).session(), (error) => error.code === "session_mismatch");
+});
+
+test("SSH discovery rejects ambiguous selection and supports unambiguous IP-only selection", async (t) => {
+  const duplicate = await fakeSshFixture(t, {
+    listing: { instances: [sshDescriptor(INSTANCE, "shared"), sshDescriptor(OTHER_INSTANCE, "shared")] },
+    sessions: { [INSTANCE]: sshSession(INSTANCE, "shared"), [OTHER_INSTANCE]: sshSession(OTHER_INSTANCE, "shared") },
+  });
+  await assert.rejects(new SshRpcClient({ host: "192.0.2.44", sessionId: "shared", sshPath: duplicate.sshPath }).session(), (error) => error.code === "session_ambiguous");
+  await assert.rejects(new SshRpcClient({ host: "192.0.2.44", sshPath: duplicate.sshPath }).session(), (error) => error.code === "session_selection_required");
+  assert.equal((await duplicate.invocations()).every((invocation) => invocation.input === ""), true);
+
+  const single = await fakeSshFixture(t, {
+    listing: { instances: [sshDescriptor(INSTANCE, "custom/session:alpha")] },
+    sessions: { [INSTANCE]: sshSession(INSTANCE, "custom/session:alpha") },
+  });
+  const session = await new SshRpcClient({ host: "192.0.2.44", sshPath: single.sshPath }).session();
+  assert.equal(session.sessionId, "custom/session:alpha");
+});
+
+test("SSH resolution is shared concurrently and keeps relay bytes and credentials private", async (t) => {
+  const fixture = await fakeSshFixture(t, {
+    listing: { instances: [sshDescriptor(INSTANCE, "ssh")] },
+    sessions: { [INSTANCE]: sshSession(INSTANCE, "ssh") },
+    artifact: [0, 1, 2, 255],
+  });
+  const output = join(fixture.root, "artifact.bin");
+  const client = new SshRpcClient({ host: "192.0.2.44", sessionId: "ssh", sshPath: fixture.sshPath, remoteCli: "/opt/omp cli/cli.mjs" });
+  const identity = { instanceId: INSTANCE, generation: 7, requestId: "job" };
+  const [session, record] = await Promise.all([client.session(), client.request(identity)]);
+  assert.equal(session.sessionId, "ssh");
+  assert.equal(record.requestId, "job");
+  await client.download(identity, ARTIFACT_ID, output);
   assert.deepEqual(await readFile(output), Buffer.from([0, 1, 2, 255]));
 
-  const invocations = (await readFile(capture, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(invocations.length, 2);
+  const invocations = await fixture.invocations();
+  assert.equal(invocations.filter((invocation) => invocation.input === "").length, 1);
+  assert.equal(invocations.filter((invocation) => JSON.parse(invocation.input || "null")?.operation === "session").length, 2);
+  assert.equal(invocations.filter((invocation) => JSON.parse(invocation.input || "null")?.operation === "request").length, 1);
   for (const invocation of invocations) {
     assert.ok(invocation.args.includes("BatchMode=yes"));
     assert.ok(invocation.args.includes("StrictHostKeyChecking=yes"));
@@ -400,7 +479,53 @@ const { appendFileSync } = require("node:fs");
     assert.equal(invocation.input.includes("token"), false);
     assert.equal(invocation.input.includes("endpoint"), false);
   }
-  assert.deepEqual(JSON.parse(invocations[0].input), { operation: "session" });
-  assert.equal(JSON.parse(invocations[1].input).operation, "download");
-  assert.throws(() => new SshRpcClient({ host: "unverified-alias", instanceId: INSTANCE }), (error) => error.code === "invalid_ssh_host");
+  assert.match(invocations.at(-1).command, /'relay' '--instance' '11111111-1111-4111-8111-111111111111'/);
+});
+
+test("SSH client validates old identities before first operation and never rebinds after restart", async (t) => {
+  const initial = { listing: { instances: [sshDescriptor(INSTANCE, "ssh")] }, sessions: { [INSTANCE]: sshSession(INSTANCE, "ssh") } };
+  const fixture = await fakeSshFixture(t, initial);
+  const wrong = new SshRpcClient({ host: "192.0.2.44", sessionId: "ssh", sshPath: fixture.sshPath });
+  await assert.rejects(wrong.request({ instanceId: OTHER_INSTANCE, generation: 7, requestId: "old" }), (error) => error.code === "instance_mismatch");
+  await assert.rejects(wrong.request({ instanceId: INSTANCE, generation: 6, requestId: "old" }), (error) => error.code === "generation_mismatch");
+  assert.deepEqual((await fixture.invocations()).map((invocation) => invocation.input && JSON.parse(invocation.input).operation).filter(Boolean), ["session"]);
+
+  const client = new SshRpcClient({ host: "192.0.2.44", sessionId: "ssh", sshPath: fixture.sshPath });
+  const pinned = await client.session();
+  const updated = { ...sshSession(INSTANCE, "ssh"), busy: true, queueDepth: 2 };
+  await fixture.writeState({ listing: initial.listing, sessions: { [INSTANCE]: updated } });
+  const refreshed = await client.session();
+  assert.equal(refreshed.busy, true);
+  assert.equal(refreshed.queueDepth, 2);
+  await fixture.writeState({ listing: { instances: [sshDescriptor(OTHER_INSTANCE, "ssh", 8)] }, sessions: { [OTHER_INSTANCE]: sshSession(OTHER_INSTANCE, "ssh", 8) } });
+  await assert.rejects(client.session(), (error) => error.code === "instance_not_found");
+  await assert.rejects(client.request({ instanceId: pinned.instanceId, generation: pinned.generation, requestId: "old" }), (error) => error.code === "instance_not_found");
+  const invocations = await fixture.invocations();
+  assert.equal(invocations.filter((invocation) => invocation.input === "").length, 2);
+  assert.match(invocations.at(-1).command, new RegExp(INSTANCE));
+  assert.doesNotMatch(invocations.at(-1).command, new RegExp(OTHER_INSTANCE));
+});
+
+test("SSH demo accepts session IDs, lists cwd, and rejects the removed instance selector", async (t) => {
+  const fixture = await fakeSshFixture(t, {
+    listing: { instances: [sshDescriptor(INSTANCE, "custom/session:alpha")] },
+    sessions: { [INSTANCE]: sshSession(INSTANCE, "custom/session:alpha") },
+  });
+  const environment = { ...process.env, PATH: `${fixture.root}:${process.env.PATH}` };
+  const selected = await execute(process.execPath, [join(import.meta.dirname, "ssh-demo.mjs"), "192.0.2.44", "--session", "custom/session:alpha"], { env: environment });
+  const output = JSON.parse(selected.stdout);
+  assert.equal(output.sessionId, "custom/session:alpha");
+  assert.equal(output.cwd, "/remote/custom/session:alpha");
+  assert.equal("instanceId" in output, false);
+
+  const listed = await execute(process.execPath, [join(import.meta.dirname, "ssh-demo.mjs"), "192.0.2.44", "--list"], { env: environment });
+  const listing = JSON.parse(listed.stdout);
+  assert.equal(listing.sessions[0].sessionId, "custom/session:alpha");
+  assert.equal(listing.sessions[0].cwd, "/remote/custom/session:alpha");
+  assert.equal("instanceId" in listing.sessions[0], false);
+
+  await assert.rejects(execute(process.execPath, [join(import.meta.dirname, "ssh-demo.mjs"), "192.0.2.44", "--instance", INSTANCE], { env: environment }), (error) => {
+    assert.match(error.stderr, /Unknown option: --instance/);
+    return true;
+  });
 });

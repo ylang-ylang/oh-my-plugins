@@ -6,7 +6,7 @@ Local and LAN message access to a running, ordinary OMP session: **anonymous HTT
 
 **Protocol v2 offers two explicit response modes.** `native` (default) completes with the isolated turn's unmodified native message array and separately exposes native events, including thinking and tool calls/results, without parsing free text. `structured` requires a caller-defined JSON Schema and an explicit native `rpc_result` submission. Both use request-scoped tools and an isolated child; CLI input takes priority and never inherits RPC formatting rules. See [PROTOCOL.md](PROTOCOL.md) for exact requests, states, caller tools, file downloads, events, limits, and v1 migration.
 
-One machine's sessions share a single **external SSH ingress**, not a new shared HTTP daemon. Each OMP retains its private listener; clients discover and route by instance/generation through SSH. HTTP/HTTPS remains an explicit direct-connect alternative.
+One machine's sessions share a single **external SSH ingress**, not a new shared HTTP daemon. Each OMP retains its private listener; clients select a session by `sessionId`, then pin that listener's `instanceId` and `generation` for every wire operation. HTTP/HTTPS remains an explicit direct-connect alternative.
 
 ## Check dependencies first
 
@@ -153,7 +153,7 @@ omp plugin install 'github:ylang-ylang/omp-lan-rpc#main'
 
 For development from a local checkout, use the link command under [Development](#development). Do not treat a linked worktree as a published release.
 
-V2 is a breaking upgrade. Before replacing a running v1 installation, finish or query its pending work while that old generation still exists. Then install both the v2 host and consuming client, fully restart OMP, and rediscover instance/generation. V1 is not preserved behind a compatibility mode: v1 routes return HTTP 410 `protocol_upgraded`. Records are memory-only, so never automatically replay a request whose old outcome is uncertain.
+V2 is a breaking upgrade. Before replacing a running v1 installation, finish or query its pending work while that old generation still exists. Then install both the v2 host and consuming client, fully restart OMP, and use a new client to rediscover the selected session and pin its new instance/generation. V1 is not preserved behind a compatibility mode: v1 routes return HTTP 410 `protocol_upgraded`. Records are memory-only, so never automatically replay a request whose old outcome is uncertain.
 
 Start an ordinary OMP session:
 
@@ -203,52 +203,53 @@ Custom OMP/XDG data roots may use a different plugin path. The v2 CLI commands a
 
 ### Local CLI: native result and event output
 
-On the OMP host, select a PID-live descriptor. Omitting `--instance` is allowed only when exactly one PID-live instance exists.
+On the OMP host, select a PID-live descriptor by its stable session ID. Omitting `--session` is allowed only when exactly one PID-live descriptor exists. Ordinary selection does not require a runtime instance UUID; advanced `--instance-id` plus `--generation` identifies one original wire identity for exact recovery operations.
 
 ```bash
 export RPC_CLI="$HOME/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs"
 node "$RPC_CLI" list
-export INSTANCE=INSTANCE_UUID_FROM_LIST
-node "$RPC_CLI" session --instance "$INSTANCE"
+export SESSION=SESSION_ID_FROM_LIST
+node "$RPC_CLI" session --session "$SESSION"
 ```
 
-Copy that session's positive `generation`, then submit a native request and read its event history:
+Copy that session's `instanceId` and positive `generation`, then submit a native request and read its event history under the original identity:
 
 ```bash
 printf '%s\n' 'Reply briefly with one benefit of request-scoped isolation.' > /tmp/lan-rpc-prompt.txt
-node "$RPC_CLI" send --instance "$INSTANCE" \
+node "$RPC_CLI" send --session "$SESSION" \
   --message-file /tmp/lan-rpc-prompt.txt \
   --request-id native_demo --response-mode native --wait
-node "$RPC_CLI" events --instance "$INSTANCE" \
+node "$RPC_CLI" events --session "$SESSION" \
+  --instance-id INSTANCE_UUID_FROM_SESSION \
   --request-id native_demo --generation GENERATION_FROM_SESSION --after 0
 ```
 
 The completed native request record contains the ordered native message array in `result`. The events response separately contains `request.state` and `native` entries; each `native` entry preserves the host event under `data` without text extraction or filtering. Native payload shapes are host-version-dependent, so consumers must accept unknown event types. See [Events and recovery](PROTOCOL.md#events-and-recovery).
 
-### SSH-first discovery: machine IP, then selected instance
+### SSH-first discovery: machine IP, then selected session
 
 The SSH prerequisite is an existing account with non-interactive authentication and a previously verified host key. Configure `User`, `Port`, `IdentityFile`, `ProxyJump`, and agents through normal OpenSSH configuration. A literal IP supplies neither credentials nor trust; the plugin never installs/configures sshd, enrolls keys, or accepts an unknown host key.
 
-From this checkout, first discover using only the machine IP, then pin access to one returned UUID:
+From this checkout, first discover using only the machine IP, then select one returned session ID:
 
 ```bash
 node ssh-demo.mjs 192.168.201.231 --list
-node ssh-demo.mjs 192.168.201.231 --instance INSTANCE_UUID
+node ssh-demo.mjs 192.168.201.231 --session OMP_SESSION_ID
 ```
 
-Running `node ssh-demo.mjs 192.168.201.231` instead selects the only reachable session automatically or prompts when several are reachable. `--list` reports probe failures separately; an unavailable selection is never replaced silently. Use `--remote-cli /absolute/remote/path/cli.mjs` for a non-default remote installation and `--ca /absolute/remote/path/cert.pem` for an HTTPS CA file that remains on the remote machine.
+Running `node ssh-demo.mjs 192.168.201.231` automatically selects the session only when discovery finds exactly one reachable session. With several, the demo prompts on an interactive terminal; a non-interactive run fails and requires `--session`. `--list` reports probe failures separately, and an unavailable explicit selection is never replaced silently. Use `--remote-cli /absolute/remote/path/cli.mjs` for a non-default remote installation and `--ca /absolute/remote/path/cert.pem` for an HTTPS CA file that remains on the remote machine.
 
-This discovery demo is read-only: it runs the remote `cli.mjs list` and v2 `session` operation, checks the selected instance and generation again, and never submits work. It invokes system OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`. Only a descriptor's loopback endpoint or an endpoint exactly matching the supplied machine IP may be relayed. SSH failure never falls back to direct networking, and no RPC port is scanned or forwarded.
+This discovery demo is read-only: it runs the remote `cli.mjs list` and v2 `session` operation, verifies the selected session against its descriptor's instance and generation, and never submits work. It invokes system OpenSSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`. Only a descriptor's loopback endpoint or an endpoint exactly matching the supplied machine IP may be relayed. SSH failure never falls back to direct networking, and no RPC port is scanned or forwarded. The relay's instance selector is an internal routing detail, not a public selection interface.
 
-Every later JSON operation and artifact byte stream can use that selected instance through the same existing SSH ingress. The remote host needs the installed plugin and Node.js >=22. The local machine needs Node.js >=22 for the supplied JavaScript demos plus system OpenSSH; it does not need OMP. `OMP_LAN_RPC_DIR`, when customized, belongs in the remote SSH environment. Existing remote HTTPS token files remain remote, TLS and hostname verification remain enabled, and SSH does not repair the security of an anonymously exposed LAN HTTP listener.
+Every later JSON operation and artifact byte stream can use that selected session through the same existing SSH ingress. The remote host needs the installed plugin and Node.js >=22. The local machine needs Node.js >=22 for the supplied JavaScript demos plus system OpenSSH; it does not need OMP. `OMP_LAN_RPC_DIR`, when customized, belongs in the remote SSH environment. Existing remote HTTPS token files remain remote, TLS and hostname verification remain enabled, and SSH does not repair the security of an anonymously exposed LAN HTTP listener.
 
 ### Runnable structured tool, artifact, and native example
 
-`examples/client.mjs` is the end-to-end Node SDK example. After discovery, run it from this checkout with the selected identity; the output path is local and must not already exist:
+`examples/client.mjs` is the end-to-end Node SDK example. Run it from this checkout with the selected session; the output path is local and must not already exist:
 
 ```bash
 export LAN_RPC_SSH_HOST=192.168.201.231
-export LAN_RPC_INSTANCE=INSTANCE_UUID
+export LAN_RPC_SESSION=OMP_SESSION_ID
 node examples/client.mjs /absolute/local/path/rpc-report.txt
 ```
 
@@ -280,12 +281,18 @@ node examples/client.mjs /absolute/local/path/rpc-report.txt
 
 Set `LAN_RPC_ALLOW_HTTP=1` only for a non-loopback anonymous HTTP endpoint after accepting that risk. Direct HTTPS requires `LAN_RPC_TOKEN_FILE`; token and CA paths in direct mode are on the local client machine.
 
-The convenience `sdk.mjs` exports `RpcError`, `RpcClient`, `SshRpcClient`, and `listSshInstances`. Direct clients use `new RpcClient({endpoint, token, ca, allowHttp, timeoutMs})`; SSH clients use `new SshRpcClient({host, instanceId, remoteCli, ca, sshPath})` after `listSshInstances({host, remoteCli, ca, sshPath})`. Both expose `session`, `submit`, `request`, `cancel`, tool-call operations, `events`, `artifacts`, `download`, `downloadTo`, and `run`. A `run` handler is called as `(arguments, {identity, toolCall, signal})`; `onEvent(event)` receives the raw event wrapper; the return value is the terminal request record. This Node SDK is optional: the HTTP/JSON protocol and remote-CLI JSON/binary relay are not client-language-specific.
+The convenience `sdk.mjs` exports `RpcError`, `RpcClient`, `SshRpcClient`, and `listSshInstances`. Direct clients use `new RpcClient({endpoint, token, ca, allowHttp, timeoutMs})`. SSH clients use `new SshRpcClient({host, sessionId, remoteCli, ca, sshPath})`; `sessionId` is optional only when the host has exactly one live descriptor, and the constructor does not accept `instanceId`. The first operation lazily discovers and verifies the selected session, then the client pins that descriptor's `instanceId` and `generation` once. Concurrent first operations share that discovery. A listener restart never silently rebinds the old client: create a new client to rediscover the session, and query the old pinned identity rather than replaying any uncertain request. `listSshInstances({host, remoteCli, ca, sshPath})` remains available for explicit listing. Both client types expose `session`, `submit`, `request`, `cancel`, tool-call operations, `events`, `artifacts`, `download`, `downloadTo`, and `run`. A `run` handler is called as `(arguments, {identity, toolCall, signal})`; `onEvent(event)` receives the raw event wrapper; the return value is the terminal request record. This Node SDK is optional: the HTTP/JSON protocol and remote-CLI JSON/binary relay are not client-language-specific.
+
+`host` must be a literal IPv4 or IPv6 machine address. Calling `session()` again re-queries and revalidates that pinned endpoint, so `busy` and `queueDepth` stay current; it does not rediscover or rebind the client.
+
+Non-interactive discovery reports `session_not_found` when no live exact match exists, `session_ambiguous` when an explicit ID matches multiple live descriptors, and `session_selection_required` when multiple live sessions exist without a selector. Verification against `/v2/session` reports `session_mismatch` instead of substituting another session. After pinning, `instance_not_found`, `instance_mismatch`, or `generation_mismatch` describes the exact internal relay identity; it never triggers rediscovery or rebinding of an old request.
+
+This repository contains no Feishu bot changes. A downstream Feishu developer must adapt that bot's bind syntax separately to store/select `sessionId` rather than a runtime instance UUID.
 
 ### V1-to-v2 consumer migration
 
 1. Before upgrading, drain or query v1 work on its original running generation. V1 records cannot be migrated across a listener/session restart.
-2. Upgrade the host and consumer together, restart OMP, call v2 `session`, and pin the newly discovered `instanceId` plus `generation`. Do not reuse an old identity.
+2. Upgrade the host and consumer together, restart OMP, and create a new client to rediscover the selected session and pin its current `instanceId` plus `generation`. Do not reuse an old identity.
 3. Replace every v1 route with `/v2/session` and the `/v2/requests` family. There is no preserved v1 behavior or compatibility flag; v1 routes return HTTP 410 `protocol_upgraded`.
 4. Choose `responseMode` explicitly. Use `native` for unmodified host messages/events. For machine data, provide `resultSchema`, use `structured`, and require the child to call `rpc_result`; do not parse assistant text as an implicit result.
 5. Declare caller tools with input/result schemas and service their calls concurrently, using either SDK `run()` or the CLI `tools`/`claim`/`result` flow. Replace any old callback-free `--wait` assumption; CLI waiting only observes request state.
@@ -349,6 +356,8 @@ node ~/.omp/plugins/node_modules/omp-lan-rpc/cli.mjs request \
   --request-id my-request --generation GENERATION_FROM_SESSION
 ```
 
+The request query above intentionally uses advanced `--instance-id` and `--generation` to address the exact original wire identity. Ordinary local or SSH session selection uses `--session` and does not require callers to supply runtime IDs.
+
 Generated recovery/query commands retain `--allow-http` and omit token files for HTTP. `--token-file` and `--ca` are forbidden for HTTP and rejected before reading those files; credentials are never transmitted over HTTP. The flag does not allow redirects or disable HTTPS verification. Loopback HTTP is also anonymous and works without this flag. Browser-origin rejection remains enabled, but is not network authentication.
 
 ### Ports, discovery, and private files
@@ -364,8 +373,8 @@ The default configuration/runtime root is `~/.omp/lan-rpc`; override it with `OM
 - This is a request-scoped HTTP/JSON v2 API, not a full network mapping of OMP's native stdio RPC. Native mode preserves the host's native output payloads; structured mode never substitutes parsed assistant text for an explicit result tool call.
 - HTTPS requires both verified TLS and a Bearer token. A token authorizes use of the existing agent and its tools; it is not a sandbox. HTTP has no authentication and grants that control to every reachable caller. Browser-origin requests remain forbidden on both transports.
 - Busy requests queue, and request IDs are deduplicated within one generation. Limits are 64 unfinished requests and 256 request records.
-- Records are memory-only. Exiting, switching sessions, or restarting the listener changes the instance and HTTPS token; managed certificate trust is stable for the same IP.
-- After a lost response, query the original instance/generation before taking further action. Resending the same ID into a new session is not cross-restart exactly-once execution.
+- Records are memory-only. Exiting, switching sessions, or restarting the listener changes the instance and HTTPS token; managed certificate trust is stable for the same IP. An SSH client pins the discovered instance/generation once and never silently follows a restart.
+- After a lost response, query the original instance/generation before taking further action. A new client may rediscover the same `sessionId` after restart, but it must not move or replay an uncertain old request into the new generation.
 - `/lanrpc stop` closes access but cannot undo tool side effects that have already happened.
 - Request tools and instructions live only in the isolated child. CLI takeover interrupts unfinished RPC work; a body claiming to be CLI cannot change its source. Caller tools are intermediate operations with leases/deadlines, not final results. Artifacts are immutable request-owned snapshots with quotas and expiry, not arbitrary file downloads.
 
@@ -397,7 +406,7 @@ Version differences must be handled inside `host/`, not spread into the RPC impl
 ## Unreleased
 
 - Add protocol v2 with selectable native messages/events or schema-validated `rpc_result`, isolated RPC execution and CLI takeover, caller-executed native tool callbacks, and controlled file artifacts. V1 clients must migrate explicitly; transport security remains unchanged.
-- Include `ssh-demo.mjs`: IP-only, read-only session discovery and selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and instance/generation checks; never fall back to direct networking.
+- Include `ssh-demo.mjs`: IP-only, read-only session discovery and `sessionId` selection through the remote CLI, without new daemons or listening ports. Enforce SSH trust, endpoint locality and pinned instance/generation checks; never fall back to direct networking.
 - Isolate OMP/Pi integration under `host/` and adapt both legacy settings methods and newer registry handles. Fix extension loading on OMP 18.8.4 (`settings.get is not a function`) while keeping native inline radar placement.
 - Match SDK custom-tool execution signatures and advertise safe native parameter structure plus complete caller schemas in tool descriptions. Enforce original schemas in isolated workers, support standard regex/unique/recursive-reference assertions, and recheck request/lease state after asynchronous validation.
 

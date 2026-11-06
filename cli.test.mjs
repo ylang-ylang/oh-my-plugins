@@ -9,8 +9,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const execute = promisify(execFile);
-const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+const CLI_URL = new URL("./cli.mjs", import.meta.url);
+const CLI = fileURLToPath(CLI_URL);
 const INSTANCE = "11111111-1111-4111-8111-111111111111";
+const INSTANCE_2 = "22222222-2222-4222-8222-222222222222";
+const INSTANCE_3 = "33333333-3333-4333-8333-333333333333";
 const ARTIFACT = "44444444-4444-4444-8444-444444444444";
 
 async function fixtureRoot(t) {
@@ -31,8 +34,9 @@ async function listen(t, handler, host = "127.0.0.1") {
 }
 
 async function writeDescriptor(root, endpoint, extra = {}) {
-  const path = join(root, "instances", `${INSTANCE}.json`);
-  await writeFile(path, JSON.stringify({ instanceId: INSTANCE, pid: process.pid, endpoint, generation: 7, sessionId: "fixture", ...extra }), { mode: 0o600 });
+  const descriptor = { instanceId: INSTANCE, pid: process.pid, endpoint, generation: 7, sessionId: "fixture", ...extra };
+  const path = join(root, "instances", `${descriptor.instanceId}.json`);
+  await writeFile(path, JSON.stringify(descriptor), { mode: 0o600 });
   return path;
 }
 
@@ -44,6 +48,15 @@ function run(root, args, options = {}) {
     ...options,
   });
 }
+async function runMainError(root, args) {
+  const script = `import { main } from ${JSON.stringify(CLI_URL.href)}; try { await main(${JSON.stringify(args)}); } catch (error) { process.stdout.write(JSON.stringify({ code: error.code, message: error.message })); }`;
+  const result = await execute(process.execPath, ["--input-type=module", "--eval", script, "cli-test-import"], {
+    env: { ...process.env, OMP_LAN_RPC_DIR: root },
+    timeout: 10_000,
+  });
+  return JSON.parse(result.stdout);
+}
+
 
 function runWithInput(root, args, input, { buffer = false } = {}) {
   return new Promise((resolve, reject) => {
@@ -92,17 +105,55 @@ test("private local discovery reaches only the pinned v2 instance and list omits
   const descriptor = await writeDescriptor(root, `http://127.0.0.1:${server.address().port}`);
 
   await chmod(descriptor, 0o660);
-  await assert.rejects(run(root, ["session", "--instance", INSTANCE]));
+  await assert.rejects(run(root, ["session", "--session", "fixture"]));
   assert.equal(received.length, 0);
   await chmod(descriptor, 0o600);
 
-  const session = await run(root, ["session", "--instance", INSTANCE]);
+  const session = await run(root, ["session", "--session", "fixture"]);
   assert.equal(JSON.parse(session.stdout).instanceId, INSTANCE);
   assert.deepEqual(received, [{ url: "/v2/session", authorization: undefined }]);
 
   const listing = JSON.parse((await run(root, ["list"])).stdout);
   assert.equal(listing.instances[0].instanceId, INSTANCE);
   assert.equal("tokenFile" in listing.instances[0], false);
+});
+
+test("public discovery selects exact live session IDs and rejects missing or ambiguous choices", async (t) => {
+  const root = await fixtureRoot(t);
+  let firstHits = 0;
+  let secondHits = 0;
+  const first = await listen(t, (_request, response) => {
+    firstHits += 1;
+    json(response, 200, { protocolVersion: 2, instanceId: INSTANCE, generation: 7, sessionId: "alpha", cwd: root, busy: false, queueDepth: 0, capabilities: {} });
+  });
+  const second = await listen(t, (_request, response) => {
+    secondHits += 1;
+    json(response, 200, { protocolVersion: 2, instanceId: INSTANCE_2, generation: 8, sessionId: "beta", cwd: root, busy: false, queueDepth: 0, capabilities: {} });
+  });
+  await writeDescriptor(root, `http://127.0.0.1:${first.address().port}`, { sessionId: "alpha" });
+  await writeDescriptor(root, `http://127.0.0.1:${second.address().port}`, { instanceId: INSTANCE_2, generation: 8, sessionId: "beta" });
+
+  const help = (await run(root, ["help"])).stdout;
+  assert.match(help, /--session SESSION_ID/);
+  assert.doesNotMatch(help, /--instance(?:\s|=)/);
+  await assert.rejects(run(root, ["session", "--instance", INSTANCE]), (error) => /unknown option: --instance/.test(error.stderr));
+
+  const selected = JSON.parse((await run(root, ["session", "--session", "beta"])).stdout);
+  assert.equal(selected.instanceId, INSTANCE_2);
+  assert.equal(firstHits, 0);
+  assert.equal(secondHits, 1);
+
+  const missing = await runMainError(root, ["session", "--session", "missing"]);
+  assert.equal(missing.code, "session_not_found");
+  const required = await runMainError(root, ["session"]);
+  assert.equal(required.code, "session_selection_required");
+  assert.match(required.message, /session IDs: "alpha", "beta"/);
+  assert.match(required.message, /use --session SESSION_ID/);
+
+  await writeDescriptor(root, "http://127.0.0.1:9", { instanceId: INSTANCE_3, generation: 9, sessionId: "beta" });
+  const ambiguous = await runMainError(root, ["session", "--session", "beta"]);
+  assert.equal(ambiguous.code, "session_ambiguous");
+  assert.match(ambiguous.message, /multiple PID-live local descriptors match session beta/);
 });
 
 test("send and submit preserve explicit v2 mode, identity, schemas, and tools", async (t) => {
@@ -120,7 +171,7 @@ test("send and submit preserve explicit v2 mode, identity, schemas, and tools", 
   await writeFile(message, "Return a structured result.");
   await writeFile(schema, JSON.stringify({ type: "object", required: ["answer"], properties: { answer: { type: "string" } }, additionalProperties: false }));
 
-  await run(root, ["send", "--instance", INSTANCE, "--message-file", message, "--request-id", "send_job", "--response-mode", "structured", "--result-schema-file", schema]);
+  await run(root, ["send", "--session", "fixture", "--message-file", message, "--request-id", "send_job", "--response-mode", "structured", "--result-schema-file", schema]);
   assert.equal(posted[0].instanceId, INSTANCE);
   assert.equal(posted[0].generation, 7);
   assert.equal(posted[0].responseMode, "structured");
@@ -136,8 +187,65 @@ test("send and submit preserve explicit v2 mode, identity, schemas, and tools", 
     tools: [{ name: "lookup_item", description: "lookup", inputSchema: { type: "object" }, resultSchema: { type: "object" } }],
   };
   await writeFile(requestFile, JSON.stringify(complete));
-  await run(root, ["submit", "--instance", INSTANCE, "--request-file", requestFile]);
+  await run(root, ["submit", "--session", "fixture", "--request-file", requestFile]);
   assert.deepEqual(posted[1], complete);
+});
+
+test("public and hidden relay session checks reject a descriptor session ID mismatch", async (t) => {
+  const root = await fixtureRoot(t);
+  let hits = 0;
+  const server = await listen(t, (_request, response) => {
+    hits += 1;
+    json(response, 200, { protocolVersion: 2, instanceId: INSTANCE, generation: 7, sessionId: "replacement", cwd: root, busy: false, queueDepth: 0, capabilities: {} });
+  });
+  await writeDescriptor(root, `http://127.0.0.1:${server.address().port}`);
+
+  await assert.rejects(run(root, ["session", "--session", "fixture"]), (error) => /session ID changed after discovery/.test(error.stderr));
+  const relayed = await runWithInput(root, ["relay", "--instance", INSTANCE, "--machine", "192.0.2.44"], JSON.stringify({ operation: "session" })).catch((error) => error);
+  assert.equal(JSON.parse(relayed.stdout).error.code, "session_mismatch");
+  assert.equal(hits, 2);
+});
+
+test("recovery keeps the original wire identity and rejects a restarted session endpoint", async (t) => {
+  const root = await fixtureRoot(t);
+  const record = {
+    instanceId: INSTANCE,
+    generation: 7,
+    sessionId: "fixture",
+    requestId: "recovery_job",
+    responseMode: "native",
+    state: "queued",
+    createdAt: 1,
+    updatedAt: 1,
+    deadlineAt: Date.now() + 60_000,
+  };
+  const original = await listen(t, async (request, response) => {
+    const url = new URL(request.url, "http://fixture");
+    if (url.pathname === "/v2/session") return json(response, 200, { protocolVersion: 2, instanceId: INSTANCE, generation: 7, sessionId: "fixture", cwd: root, busy: false, queueDepth: 0, capabilities: {} });
+    if (request.method === "POST") await jsonBody(request);
+    json(response, request.method === "POST" ? 202 : 200, record);
+  });
+  const descriptor = await writeDescriptor(root, `http://127.0.0.1:${original.address().port}`);
+  const message = join(root, "recovery-message.txt");
+  await writeFile(message, "Keep this request identity pinned.");
+
+  const timedOut = await run(root, ["send", "--session", "fixture", "--message-file", message, "--request-id", "recovery_job", "--wait", "--timeout", "1"]).catch((error) => error);
+  assert.equal(timedOut.code, 3, timedOut.stderr);
+  assert.match(timedOut.stderr, /'request' '--session' 'fixture' '--instance-id' '11111111-1111-4111-8111-111111111111'/);
+  assert.match(timedOut.stderr, /'--request-id' 'recovery_job' '--generation' '7'/);
+
+  await rm(descriptor);
+  let replacementHits = 0;
+  const replacement = await listen(t, (_request, response) => {
+    replacementHits += 1;
+    json(response, 500, { error: { code: "unexpected", message: "must not contact replacement" } });
+  });
+  await writeDescriptor(root, `http://127.0.0.1:${replacement.address().port}`, { instanceId: INSTANCE_2, generation: 8 });
+  await assert.rejects(
+    run(root, ["request", "--session", "fixture", "--instance-id", INSTANCE, "--request-id", "recovery_job", "--generation", "7"]),
+    (error) => /--instance-id does not match the selected local descriptor/.test(error.stderr),
+  );
+  assert.equal(replacementHits, 0);
 });
 
 test("HTTP credential options are rejected before files are read or requests are sent", async (t) => {
@@ -160,6 +268,14 @@ test("SSH relay restricts descriptors to loopback or the supplied machine before
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.error.code, "relay_failed");
   assert.match(payload.error.message, /neither loopback nor the supplied SSH machine address/);
+
+  await assert.rejects(
+    runWithInput(root, ["relay", "--session", "fixture", "--machine", "192.0.2.9"], JSON.stringify({ operation: "session" })),
+    (error) => error.code === 1 && /unknown option: --session/.test(error.stderr),
+  );
+  const unpinned = await runWithInput(root, ["relay", "--machine", "192.0.2.9"], JSON.stringify({ operation: "session" })).catch((error) => error);
+  assert.equal(unpinned.code, 4);
+  assert.match(JSON.parse(unpinned.stdout).error.message, /--instance is required/);
 });
 
 test("relay carries JSON operations and artifact bytes over bounded stdin/stdout", async (t) => {
@@ -174,7 +290,7 @@ test("relay carries JSON operations and artifact bytes over bounded stdin/stdout
     }
     json(response, 404, { error: { code: "not_found", message: "missing" } });
   });
-  await writeDescriptor(root, `http://127.0.0.1:${server.address().port}`);
+  await writeDescriptor(root, `http://127.0.0.1:${server.address().port}`, { sessionId: "relay" });
   const common = ["relay", "--instance", INSTANCE, "--machine", "192.0.2.44"];
   const session = await runWithInput(root, common, JSON.stringify({ operation: "session" }));
   assert.equal(JSON.parse(session.stdout).sessionId, "relay");

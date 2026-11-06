@@ -624,9 +624,17 @@ function quoteRemote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function validateSshOptions({ host, instanceId, remoteCli, ca, sshPath = "ssh" } = {}, requireInstance = true) {
+function validateSshOptions(options = {}, { allowSessionId = false } = {}) {
+  plainObject(options, "SSH options");
+  if (Object.hasOwn(options, "instanceId")) {
+    throw new RpcError("instanceId is not a public SSH selector; use sessionId", { code: "invalid_client_argument" });
+  }
+  const { host, sessionId, remoteCli, ca, sshPath = "ssh" } = options;
   if (typeof host !== "string" || isIP(host) === 0) throw new RpcError("SSH host must be a literal IPv4 or IPv6 address", { code: "invalid_ssh_host" });
-  if (requireInstance && !UUID_PATTERN.test(instanceId ?? "")) throw new RpcError("SSH transport requires a selected instance UUID", { code: "invalid_identity" });
+  if (!allowSessionId && sessionId !== undefined) throw new RpcError("sessionId is valid only when constructing SshRpcClient", { code: "invalid_client_argument" });
+  if (allowSessionId && sessionId !== undefined && (typeof sessionId !== "string" || sessionId.length === 0)) {
+    throw new RpcError("sessionId must be a non-empty string", { code: "invalid_client_argument" });
+  }
   if (remoteCli !== undefined && (typeof remoteCli !== "string" || !remoteCli.startsWith("/") || remoteCli.includes("\n") || remoteCli.includes("\r"))) {
     throw new RpcError("remoteCli must be an absolute remote path", { code: "invalid_client_argument" });
   }
@@ -636,7 +644,7 @@ function validateSshOptions({ host, instanceId, remoteCli, ca, sshPath = "ssh" }
   if (typeof sshPath !== "string" || sshPath.length === 0 || (!isAbsolute(sshPath) && sshPath.includes("/"))) {
     throw new RpcError("sshPath must be a command name or absolute local path", { code: "invalid_client_argument" });
   }
-  return { host, instanceId, remoteCli, ca, sshPath };
+  return { host, sessionId, remoteCli, ca, sshPath };
 }
 
 function remoteCliCommand(options, relay = true) {
@@ -691,15 +699,77 @@ function waitChild(child) {
   });
 }
 
+function checkedLiveSshDescriptors(listing) {
+  const live = listing.instances.filter((descriptor) => descriptor?.status === "live");
+  for (const descriptor of live) {
+    if (!UUID_PATTERN.test(descriptor.instanceId ?? "") || !Number.isSafeInteger(descriptor.generation) || descriptor.generation <= 0 || typeof descriptor.sessionId !== "string" || descriptor.sessionId.length === 0) {
+      throw new RpcError("remote CLI returned invalid live instance metadata", { code: "invalid_response" });
+    }
+  }
+  return live;
+}
+
+function requirePinnedIdentity(args, pinned) {
+  const identity = args.identity ?? args.request;
+  if (!identity) return;
+  if (identity.instanceId !== pinned.instanceId) {
+    throw new RpcError("request identity does not match the selected SSH instance", { code: "instance_mismatch" });
+  }
+  if (identity.generation !== pinned.generation) {
+    throw new RpcError("request identity does not match the selected SSH generation", { code: "generation_mismatch" });
+  }
+}
+
+function validatePinnedSshSession(value, descriptor) {
+  const session = validateSession(value, descriptor.instanceId);
+  if (session.generation !== descriptor.generation) {
+    throw new RpcError("live SSH session generation changed after discovery", { code: "generation_mismatch" });
+  }
+  if (session.sessionId !== descriptor.sessionId) {
+    throw new RpcError("live SSH session does not match the selected sessionId", { code: "session_mismatch" });
+  }
+  return session;
+}
+
 export class SshRpcClient extends Operations {
   constructor(options = {}) {
     super();
-    this.ssh = validateSshOptions(options);
-    this.expectedInstanceId = this.ssh.instanceId;
+    const { sessionId, ...ssh } = validateSshOptions(options, { allowSessionId: true });
+    this.ssh = ssh;
+    this.sessionId = sessionId;
+    this.resolution = undefined;
+  }
+
+  async _resolve() {
+    this.resolution ??= this._discoverAndPin();
+    return await this.resolution;
+  }
+
+  async _discoverAndPin() {
+    const listing = await listSshInstances(this.ssh);
+    const live = checkedLiveSshDescriptors(listing);
+    const matches = this.sessionId === undefined ? live : live.filter((descriptor) => descriptor.sessionId === this.sessionId);
+    if (matches.length === 0) {
+      throw new RpcError(this.sessionId === undefined ? "no live SSH session was discovered" : "selected SSH session was not found", { code: "session_not_found" });
+    }
+    if (matches.length !== 1) {
+      const code = this.sessionId === undefined ? "session_selection_required" : "session_ambiguous";
+      throw new RpcError(this.sessionId === undefined ? "multiple live SSH sessions require an explicit sessionId" : "multiple live SSH instances report the selected sessionId", { code });
+    }
+    const descriptor = matches[0];
+    const ssh = { ...this.ssh, instanceId: descriptor.instanceId };
+    validatePinnedSshSession(await runSshJson(ssh, { operation: "session" }), descriptor);
+    this.expectedInstanceId = descriptor.instanceId;
+    return { ssh, descriptor };
   }
 
   async _call(operation, args) {
-    return await runSshJson(this.ssh, { operation, ...args });
+    const resolved = await this._resolve();
+    if (operation === "session") {
+      return validatePinnedSshSession(await runSshJson(resolved.ssh, { operation: "session" }), resolved.descriptor);
+    }
+    requirePinnedIdentity(args, resolved.descriptor);
+    return await runSshJson(resolved.ssh, { operation, ...args });
   }
 
   async _download(identity, artifactId, outputPath) {
@@ -709,8 +779,10 @@ export class SshRpcClient extends Operations {
   }
 
   async _downloadTo(identity, artifactId, writable) {
+    const resolved = await this._resolve();
+    requirePinnedIdentity({ identity }, resolved.descriptor);
     const payload = encodeJson({ operation: "download", identity, artifactId }, MAX_RELAY_INPUT_BYTES, "SSH relay input");
-    const child = spawnSsh(this.ssh, remoteCliCommand(this.ssh, true));
+    const child = spawnSsh(resolved.ssh, remoteCliCommand(resolved.ssh, true));
     const completed = waitChild(child);
     child.stderr.resume();
     child.stdin.on("error", () => {});
@@ -729,7 +801,7 @@ export class SshRpcClient extends Operations {
 }
 
 export async function listSshInstances(options = {}) {
-  const ssh = validateSshOptions(options, false);
+  const { sessionId: _sessionId, ...ssh } = validateSshOptions(options);
   const value = plainObject(await runSshJson(ssh, undefined, false), "remote instance list");
   if (!Array.isArray(value.instances)) throw new RpcError("remote CLI returned an invalid instance list", { code: "invalid_response" });
   return value;

@@ -36,19 +36,18 @@ const LOOKUP_TOOL = {
 
 async function clientFromEnvironment() {
   const sshHost = process.env.LAN_RPC_SSH_HOST;
-  const instanceId = process.env.LAN_RPC_INSTANCE;
+  const sessionId = process.env.LAN_RPC_SESSION;
   if (sshHost) {
-    if (!instanceId) throw new Error("LAN_RPC_INSTANCE is required with LAN_RPC_SSH_HOST");
     return new SshRpcClient({
       host: sshHost,
-      instanceId,
+      sessionId,
       remoteCli: process.env.LAN_RPC_REMOTE_CLI,
       ca: process.env.LAN_RPC_REMOTE_CA,
     });
   }
 
   const endpoint = process.env.LAN_RPC_ENDPOINT;
-  if (!endpoint) throw new Error("Set LAN_RPC_SSH_HOST + LAN_RPC_INSTANCE, or set LAN_RPC_ENDPOINT for an explicit direct connection");
+  if (!endpoint) throw new Error("Set LAN_RPC_SSH_HOST (optionally LAN_RPC_SESSION), or set LAN_RPC_ENDPOINT for an explicit direct connection");
   const protocol = new URL(endpoint).protocol;
   let token;
   if (process.env.LAN_RPC_TOKEN_FILE) token = (await readPrivateFile(resolve(process.env.LAN_RPC_TOKEN_FILE), 4 * 1024)).trim();

@@ -45,8 +45,9 @@ USAGE
 
 CONNECTION
   Local discovery (recommended on the OMP host):
-    --instance UUID       Select one private runtime descriptor. With no
-                          connection flag, exactly one PID-live instance is required.
+    --session SESSION_ID  Select the PID-live private runtime descriptor for one
+                          exact OMP session. With no connection flag, exactly one
+                          PID-live descriptor is required.
 
   Explicit direct HTTP(S), never an SSH fallback:
     --endpoint ORIGIN     Example: https://192.0.2.10:9443
@@ -54,13 +55,13 @@ CONNECTION
     --ca PATH             Optional trusted CA bundle; HTTPS only.
     --allow-http          Explicit consent for anonymous non-loopback plaintext HTTP.
 
-  --endpoint cannot be combined with --instance. Origins cannot contain URL
+  --endpoint cannot be combined with --session. Origins cannot contain URL
   credentials, paths, queries, or fragments. Redirects are never followed.
   HTTPS always verifies its certificate and hostname. --allow-http never weakens
   TLS. HTTP is anonymous and never reads or sends a bearer token.
 
   Cross-machine access should use sdk.mjs SshRpcClient or ssh-demo.mjs with a
-  literal machine IP and selected instance. Every JSON operation and artifact
+  literal machine IP and optional session ID. Every JSON operation and artifact
   byte then runs through the existing, host-verified OpenSSH connection and the
   remote CLI. There is no local port, extra daemon, base64, direct fallback, or
   copied credential. OpenSSH BatchMode and StrictHostKeyChecking are mandatory;
@@ -73,9 +74,10 @@ CONNECTION
 IDENTITY
   --request-id ID --generation GEN [--instance-id UUID]
 
-  Local discovery supplies and verifies instanceId, so --instance-id is optional.
-  An explicit --endpoint has no descriptor and therefore requires --instance-id.
-  Every mutation and query remains pinned to instanceId plus generation. Never
+  --instance-id is the immutable wire identity, not a discovery selector. Local
+  discovery supplies and verifies it, so it is normally omitted. An explicit
+  --endpoint has no descriptor and therefore requires --instance-id. Every
+  mutation and query remains pinned to instanceId plus generation. Never
   substitute a newly discovered generation after a timeout or uncertain result.
 
 COMMANDS
@@ -128,21 +130,21 @@ WAITING AND EXIT STATUS
 
 LOCAL EXAMPLES
   Native request:
-    node /abs/repo/cli.mjs send --instance INSTANCE_UUID \\
+    node /abs/repo/cli.mjs send --session SESSION_ID \\
       --message-file /abs/prompt.txt --response-mode native --wait
 
   Complete structured request with caller tools:
-    node /abs/repo/cli.mjs submit --instance INSTANCE_UUID \\
+    node /abs/repo/cli.mjs submit --session SESSION_ID \\
       --request-file /abs/request.json
-    node /abs/repo/cli.mjs tools --instance INSTANCE_UUID \\
+    node /abs/repo/cli.mjs tools --session SESSION_ID \\
       --request-id job_1 --generation 123
-    node /abs/repo/cli.mjs claim --instance INSTANCE_UUID \\
+    node /abs/repo/cli.mjs claim --session SESSION_ID \\
       --request-id job_1 --generation 123 --tool-call-id CALL_UUID \\
       --worker-id worker_1 --claim-id claim_1
-    node /abs/repo/cli.mjs result --instance INSTANCE_UUID \\
+    node /abs/repo/cli.mjs result --session SESSION_ID \\
       --request-id job_1 --generation 123 --tool-call-id CALL_UUID \\
       --result-file /abs/tool-result.json
-    node /abs/repo/cli.mjs download --instance INSTANCE_UUID \\
+    node /abs/repo/cli.mjs download --session SESSION_ID \\
       --request-id job_1 --generation 123 --artifact-id ARTIFACT_UUID \\
       --output /abs/report.txt
 
@@ -205,7 +207,7 @@ function parseOptions(args, specification) {
 }
 
 const CONNECTION_SPEC = Object.freeze({
-  "--instance": "value",
+  "--session": "value",
   "--endpoint": "value",
   "--token-file": "value",
   "--ca": "value",
@@ -355,50 +357,57 @@ async function loadDescriptorEntries() {
   return result;
 }
 
-async function selectDescriptor(instanceId) {
+async function selectDescriptor(sessionId) {
   const entries = await loadDescriptorEntries();
-  const valid = entries.filter((entry) => entry.descriptor);
-  if (instanceId !== undefined) {
-    validateUuid(instanceId, "--instance");
-    const selected = valid.find((entry) => entry.descriptor.instanceId === instanceId);
-    if (!selected) throw new CliError(`local instance not found: ${instanceId}`, 1, { code: "instance_not_found" });
-    if (selected.status !== "live") throw new CliError(`local instance PID is stale: ${instanceId}`, 1, { code: "instance_not_found" });
-    return selected.descriptor;
+  const live = entries.filter((entry) => entry.descriptor && entry.status === "live");
+  if (sessionId !== undefined) {
+    const matches = live.filter((entry) => entry.descriptor.sessionId === sessionId);
+    if (matches.length === 0) throw new CliError(`local session not found: ${sessionId}`, 1, { code: "session_not_found" });
+    if (matches.length > 1) throw new CliError(`multiple PID-live local descriptors match session ${sessionId}`, 1, { code: "session_ambiguous" });
+    return matches[0].descriptor;
   }
-  const live = valid.filter((entry) => entry.status === "live");
-  if (live.length === 0) throw new CliError("no PID-live local instance found; start OMP or select an explicit endpoint", 1, { code: "instance_not_found" });
-  if (live.length !== 1) throw new CliError(`multiple PID-live local instances found (${live.map((entry) => entry.descriptor.instanceId).join(", ")}); use --instance UUID`, 1, { code: "instance_selection_required" });
+  if (live.length === 0) throw new CliError("no PID-live local session found; start OMP or select an explicit endpoint", 1, { code: "session_not_found" });
+  if (live.length > 1) {
+    const sessionIds = live.map((entry) => JSON.stringify(entry.descriptor.sessionId)).join(", ");
+    throw new CliError(`multiple PID-live local sessions found (session IDs: ${sessionIds}); use --session SESSION_ID`, 1, { code: "session_selection_required" });
+  }
   return live[0].descriptor;
 }
 
-async function resolveConnection(options, { relayMachine } = {}) {
-  const instance = options["--instance"];
+async function selectDescriptorByInstance(instanceId) {
+  validateUuid(instanceId, "--instance");
+  const entries = await loadDescriptorEntries();
+  const selected = entries.find((entry) => entry.descriptor?.instanceId === instanceId);
+  if (!selected) throw new CliError(`local instance not found: ${instanceId}`, 1, { code: "instance_not_found" });
+  if (selected.status !== "live") throw new CliError(`local instance PID is stale: ${instanceId}`, 1, { code: "instance_not_found" });
+  return selected.descriptor;
+}
+
+async function resolveConnection(options) {
+  const sessionId = options["--session"];
   const endpoint = options["--endpoint"];
+  const tokenFile = options["--token-file"];
+  if (sessionId !== undefined && (endpoint !== undefined || tokenFile !== undefined)) throw new CliError("--session cannot be combined with --endpoint or --token-file");
+  if (endpoint === undefined && tokenFile !== undefined) throw new CliError("--token-file requires an explicit HTTPS --endpoint");
+  const descriptor = endpoint === undefined ? await selectDescriptor(sessionId) : undefined;
+  return await connect(options, descriptor);
+}
+
+async function resolveRelayConnection(options, relayMachine) {
+  const descriptor = await selectDescriptorByInstance(requireOption(options, "--instance"));
+  return await connect(options, descriptor, relayMachine);
+}
+
+async function connect(options, descriptor, relayMachine) {
+  const rawEndpoint = descriptor?.endpoint ?? options["--endpoint"];
+  const tokenPath = descriptor?.tokenFile ?? options["--token-file"];
   const tokenFile = options["--token-file"];
   const caFile = options["--ca"];
   const allowHttp = options["--allow-http"] === true;
-  if (instance !== undefined && (endpoint !== undefined || tokenFile !== undefined)) throw new CliError("--instance cannot be combined with --endpoint or --token-file");
-  if (endpoint === undefined && tokenFile !== undefined) throw new CliError("--token-file requires an explicit HTTPS --endpoint");
-
-  let descriptor;
-  let rawEndpoint;
-  let tokenPath;
-  let mode;
-  if (endpoint !== undefined) {
-    rawEndpoint = endpoint;
-    tokenPath = tokenFile;
-    mode = "remote";
-  } else {
-    descriptor = await selectDescriptor(instance);
-    rawEndpoint = descriptor.endpoint;
-    tokenPath = descriptor.tokenFile;
-    mode = "local";
-  }
   const url = endpointUrl(rawEndpoint);
 
   if (relayMachine !== undefined) {
     if (isIP(relayMachine) === 0) throw new CliError("--machine must be a literal IPv4 or IPv6 address");
-    if (!descriptor) throw new CliError("SSH relay requires local instance discovery");
     const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
     if (!loopbackHostname(host) && host !== relayMachine.toLowerCase()) throw new CliError("discovered endpoint is neither loopback nor the supplied SSH machine address");
   }
@@ -420,7 +429,7 @@ async function resolveConnection(options, { relayMachine } = {}) {
   }
   let client;
   try { client = new RpcClient({ endpoint: url.origin, token, ca, allowHttp: allowHttp || relayMachine !== undefined }); } catch (error) { throw cliError(error); }
-  return { client, descriptor, instanceId: descriptor?.instanceId, endpoint: url, tokenFile: tokenFilePath, caFile: caPath, allowHttp, mode };
+  return { client, descriptor, instanceId: descriptor?.instanceId, endpoint: url, tokenFile: tokenFilePath, caFile: caPath, allowHttp, mode: descriptor ? "local" : "remote" };
 }
 
 function assertSession(connection, session) {
@@ -429,6 +438,9 @@ function assertSession(connection, session) {
   }
   if (connection.descriptor && session.generation !== connection.descriptor.generation) {
     throw new CliError("session generation changed after discovery; rediscover explicitly", 1, { code: "generation_mismatch" });
+  }
+  if (connection.descriptor && session.sessionId !== connection.descriptor.sessionId) {
+    throw new CliError("session ID changed after discovery; rediscover explicitly", 1, { code: "session_mismatch" });
   }
   return session;
 }
@@ -452,7 +464,7 @@ function shellQuote(value) { return `'${String(value).replaceAll("'", "'\\''")}'
 
 function recoveryCommand(connection, identity) {
   const parts = [process.execPath, resolve(process.argv[1]), "request"];
-  if (connection.mode === "local") parts.push("--instance", connection.instanceId);
+  if (connection.mode === "local") parts.push("--session", connection.descriptor.sessionId, "--instance-id", identity.instanceId);
   else {
     parts.push("--endpoint", connection.endpoint.origin, "--instance-id", identity.instanceId);
     if (connection.tokenFile) parts.push("--token-file", connection.tokenFile);
@@ -671,7 +683,7 @@ async function commandRelay(args) {
     const payload = await readRelayInput();
     binary = payload.operation === "download";
     const machine = requireOption(options, "--machine");
-    const connection = await resolveConnection(options, { relayMachine: machine });
+    const connection = await resolveRelayConnection(options, machine);
     let value;
     switch (payload.operation) {
       case "session":
