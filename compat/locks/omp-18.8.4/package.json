@@ -1,0 +1,9 @@
+{
+  "name": "compat-omp-18-8-4",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.8.4",
+    "ajv": "8.20.0"
+  }
+}

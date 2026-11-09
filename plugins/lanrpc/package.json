@@ -1,0 +1,63 @@
+{
+  "name": "@ylang/lanrpc",
+  "version": "0.5.5",
+  "private": true,
+  "type": "module",
+  "description": "LAN RPC for existing interactive OMP and Pi sessions",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylang-ylang/oh-my-plugins.git",
+    "directory": "plugins/lanrpc"
+  },
+  "homepage": "https://github.com/ylang-ylang/oh-my-plugins",
+  "bugs": {
+    "url": "https://github.com/ylang-ylang/oh-my-plugins/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "lanrpc": "./cli.mjs"
+  },
+  "omp": {
+    "extensions": [
+      "./extension.mjs"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./extension.mjs"
+    ]
+  },
+  "files": [
+    "extension.mjs",
+    "host/index.mjs",
+    "host/adapters/index.mjs",
+    "host/adapters/omp.mjs",
+    "host/adapters/pi.mjs",
+    "host/adapters/pi-session.mjs",
+    "host/execution.mjs",
+    "status.mjs",
+    "controller.mjs",
+    "operations.mjs",
+    "protocol.mjs",
+    "schema.mjs",
+    "schema-runtime.mjs",
+    "schema-worker.mjs",
+    "artifacts.mjs",
+    "sdk.mjs",
+    "examples/",
+    "PROTOCOL.md",
+    "server.mjs",
+    "config.mjs",
+    "tls.mjs",
+    "cli.mjs",
+    "ssh-demo.mjs"
+  ],
+  "scripts": {
+    "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs sdk.test.mjs schema.test.mjs artifacts.test.mjs config.test.mjs tls.test.mjs status.test.mjs operations.test.mjs host/execution.test.mjs host/adapters/pi.test.mjs"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0"
+  }
+}

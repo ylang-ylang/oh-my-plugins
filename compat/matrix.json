@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "runtimes": {
+    "bun": {
+      "version": "1.4.4",
+      "image": "oven/bun:1.4.4-debian@sha256:93d5032fe06d163427822dc1598f420363759bb18155c9cc90eb1be05a64a19e"
+    },
+    "node": {
+      "version": "22.22.0",
+      "image": "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
+    }
+  },
+  "timeoutMs": 90000,
+  "cases": [
+    {
+      "id": "omp-18.2.6",
+      "family": "omp",
+      "runtime": "bun",
+      "package": "@oh-my-pi/pi-coding-agent",
+      "version": "18.2.6",
+      "integrity": "sha512-dk298PZNnD1QigR4lKvQpWVAAbIo2bCfdNOlZwGFZsxHbP+XYrUS+AxYxfWkfqSnFRliP9Ho+h94DHV3o6lxRg==",
+      "executable": "omp",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "omp",
+        "settingsBoundary": "string-path",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "native-conversation-request",
+          "structured-result-tool",
+          "request-tool-schema",
+          "native-status",
+          "agent-registry",
+          "cancellation"
+        ],
+        "reason": "Oldest supported OMP boundary: native conversation/scoped-tool APIs are present and status settings use get/override/clearOverride string paths."
+      }
+    },
+    {
+      "id": "omp-18.6.0",
+      "family": "omp",
+      "runtime": "bun",
+      "package": "@oh-my-pi/pi-coding-agent",
+      "version": "18.6.0",
+      "integrity": "sha512-aZkA4WU7sk8vjaJi51EN0Qv+arAYl1IfEgcFxmHioebdtafXF3NJWKDlTfwKFkocbSToq7KjLWwvbRG6rbroSw==",
+      "executable": "omp",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "omp",
+        "settingsBoundary": "registry",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "native-conversation-request",
+          "structured-result-tool",
+          "request-tool-schema",
+          "native-status",
+          "agent-registry",
+          "cancellation"
+        ],
+        "reason": "First registry-only settings boundary: Settings.get/override/clearOverride are absent and config/registry is present, so the adapter must resolve status descriptors through the registry."
+      }
+    },
+    {
+      "id": "omp-18.7.0",
+      "family": "omp",
+      "runtime": "bun",
+      "package": "@oh-my-pi/pi-coding-agent",
+      "version": "18.7.0",
+      "integrity": "sha512-oTjR5BEZdCmB+PUbhVZcOwbNIQ8YFXDKhCmG/f5EuIouu1DL0pLMeWO3FY+1WxhS9IbIL1wm7O4I1xsjUCFz3Q==",
+      "executable": "omp",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "omp",
+        "settingsBoundary": "registry",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "native-conversation-request",
+          "structured-result-tool",
+          "request-tool-schema",
+          "native-status",
+          "agent-registry",
+          "cancellation"
+        ],
+        "reason": "Registry-only follow-up boundary: Settings.get/override/clearOverride remain absent and native execution APIs remain compatible."
+      }
+    },
+    {
+      "id": "omp-18.8.4",
+      "family": "omp",
+      "runtime": "bun",
+      "package": "@oh-my-pi/pi-coding-agent",
+      "version": "18.8.4",
+      "integrity": "sha512-MIiecZZbQT45Lnn1fJwq2gCG2+LBJwQ0cyQodqIPxnzcIRgawapLEaYZn/zXBo+0tn2oCZO6QiJrgKHe1OrsHg==",
+      "executable": "omp",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "omp",
+        "settingsBoundary": "registry",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "native-conversation-request",
+          "structured-result-tool",
+          "request-tool-schema",
+          "native-status",
+          "agent-registry",
+          "cancellation"
+        ],
+        "reason": "OMP registry-settings boundary: native conversation/scoped-tool APIs remain present while status settings moved to config/registry descriptors."
+      }
+    },
+    {
+      "id": "omp-18.17.0",
+      "family": "omp",
+      "runtime": "bun",
+      "package": "@oh-my-pi/pi-coding-agent",
+      "version": "18.17.0",
+      "integrity": "sha512-wadF0I1p6YsY7AwNrM+espeaaodCUWpl4Hs23aVcYArB/lUdG4NUQ74Da7oc+xUEQq1LkbuJCtIpUaF4NgUudg==",
+      "executable": "omp",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "omp",
+        "settingsBoundary": "registry",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "native-conversation-request",
+          "structured-result-tool",
+          "request-tool-schema",
+          "native-status",
+          "agent-registry",
+          "cancellation"
+        ],
+        "reason": "Current published OMP and Bun 1.4.4 engine boundary with the public native conversation, registry, status, and cancellation APIs."
+      }
+    },
+    {
+      "id": "pi-0.73.1",
+      "family": "pi",
+      "runtime": "node",
+      "package": "@mariozechner/pi-coding-agent",
+      "version": "0.73.1",
+      "integrity": "sha512-gXQh3SaZmWTfVMc4Ao5+LGbVeKvzyO7tolok0nLsZgq9nGjZx/EEU3NM8C+qUnB4Nvs2rswG5qOVgLzQkq0fHQ==",
+      "executable": "pi",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "pi",
+        "btw": "supported",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "generic-tool-schema",
+          "generic-tool-execution",
+          "session-events",
+          "tool-cancellation",
+          "btw-ask-stream-history-followup-cancel",
+          "btw-history-isolation",
+          "lan-rpc-public-session-facade",
+          "lan-rpc-http-listener-panel-inline-status",
+          "lan-rpc-native-and-structured-results",
+          "lan-rpc-caller-tool-schema",
+          "lan-rpc-cancellation",
+          "lan-rpc-tool-retirement",
+          "lan-rpc-user-boundary",
+          "lan-rpc-repeated-requests",
+          "lan-rpc-state-identity"
+        ],
+        "reason": "Last legacy @mariozechner Pi release: LAN RPC and /btw run through the public extension lifecycle, conversation, tool, cancellation, and UI contracts."
+      }
+    },
+    {
+      "id": "pi-0.74.0",
+      "family": "pi",
+      "runtime": "node",
+      "package": "@earendil-works/pi-coding-agent",
+      "version": "0.74.0",
+      "integrity": "sha512-Q5GikbB5vRBrsrrf/uvet53rPSQ1sn5I5mO+l7sIobdXYpS04/X2oOc2UHFm90fNdkl3yU+ANTZL0zOtHbnqRw==",
+      "executable": "pi",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "pi",
+        "btw": "supported",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "generic-tool-schema",
+          "generic-tool-execution",
+          "session-events",
+          "tool-cancellation",
+          "btw-ask-stream-history-followup-cancel",
+          "btw-history-isolation",
+          "lan-rpc-public-session-facade",
+          "lan-rpc-http-listener-panel-inline-status",
+          "lan-rpc-native-and-structured-results",
+          "lan-rpc-caller-tool-schema",
+          "lan-rpc-cancellation",
+          "lan-rpc-tool-retirement",
+          "lan-rpc-user-boundary",
+          "lan-rpc-repeated-requests",
+          "lan-rpc-state-identity"
+        ],
+        "reason": "First @earendil-works namespace release: LAN RPC and /btw remain supported through the same public Pi extension contracts across the rename."
+      }
+    },
+    {
+      "id": "pi-1.5.0",
+      "family": "pi",
+      "runtime": "node",
+      "package": "@earendil-works/pi-coding-agent",
+      "version": "1.5.0",
+      "integrity": "sha512-xNDZ5kqowO6Z03FS2gwAkPEGk1ssxVcYKQ6qZId84mFEvwACvvyc2l0vAMOS+c5zvxLRMLBE9r4y44IGYkMJaQ==",
+      "executable": "pi",
+      "expected": {
+        "lanRpc": "supported",
+        "adapter": "pi",
+        "btw": "supported",
+        "capabilities": [
+          "actual-cli-entrypoint",
+          "extension-lifecycle",
+          "generic-tool-schema",
+          "generic-tool-execution",
+          "session-events",
+          "tool-cancellation",
+          "btw-ask-stream-history-followup-cancel",
+          "btw-history-isolation",
+          "lan-rpc-public-session-facade",
+          "lan-rpc-http-listener-panel-inline-status",
+          "lan-rpc-native-and-structured-results",
+          "lan-rpc-caller-tool-schema",
+          "lan-rpc-cancellation",
+          "lan-rpc-tool-retirement",
+          "lan-rpc-user-boundary",
+          "lan-rpc-repeated-requests",
+          "lan-rpc-state-identity"
+        ],
+        "reason": "Current published Pi: LAN RPC uses public extension APIs, hidden inactive tool tombstones for safe retirement, and the inline native footer status slot; /btw remains isolated."
+      }
+    }
+  ]
+}

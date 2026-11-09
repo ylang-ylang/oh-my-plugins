@@ -1,51 +1,47 @@
 {
-  "name": "omp-lan-rpc",
-  "version": "0.4.0",
+  "name": "oh-my-plugins",
+  "version": "0.5.5",
   "private": true,
   "type": "module",
-  "description": "Local and LAN message access to an OMP session: anonymous HTTP or verified, authenticated HTTPS",
+  "description": "OMP and Pi plugin collection: LAN RPC and BTW",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ylang-ylang/omp-lan-rpc.git"
+    "url": "git+https://github.com/ylang-ylang/oh-my-plugins.git"
   },
-  "homepage": "https://github.com/ylang-ylang/omp-lan-rpc",
+  "homepage": "https://github.com/ylang-ylang/oh-my-plugins",
   "bugs": {
-    "url": "https://github.com/ylang-ylang/omp-lan-rpc/issues"
+    "url": "https://github.com/ylang-ylang/oh-my-plugins/issues"
   },
   "engines": {
     "node": ">=22"
   },
-  "bin": {
-    "omp-lan-rpc": "./cli.mjs"
-  },
+  "workspaces": [
+    "plugins/*"
+  ],
   "omp": {
     "extensions": [
-      "./extension.mjs"
+      "./plugins/lanrpc/extension.mjs"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./plugins/lanrpc/extension.mjs",
+      "./plugins/btw/extension.ts"
     ]
   },
   "files": [
-    "extension.mjs",
-    "host/index.mjs",
-    "host/settings.mjs",
-    "host/execution.mjs",
-    "status.mjs",
-    "controller.mjs",
-    "protocol.mjs",
-    "schema.mjs",
-    "schema-runtime.mjs",
-    "schema-worker.mjs",
-    "artifacts.mjs",
-    "sdk.mjs",
-    "examples/",
-    "PROTOCOL.md",
-    "server.mjs",
-    "config.mjs",
-    "tls.mjs",
-    "cli.mjs",
-    "ssh-demo.mjs"
+    "plugins/*",
+    "!plugins/**/*.test.mjs",
+    "!plugins/**/test-support.mjs"
   ],
   "scripts": {
-    "test": "node --test controller.test.mjs server.test.mjs cli.test.mjs sdk.test.mjs schema.test.mjs artifacts.test.mjs config.test.mjs tls.test.mjs status.test.mjs host/execution.test.mjs"
+    "test": "npm run test --workspaces",
+    "test:lanrpc": "npm run test --workspace @ylang/lanrpc",
+    "test:btw": "npm run test --workspace @ylang/pi-btw",
+    "test:compat": "node compat/docker.mjs --all",
+    "compat:list": "node compat/docker.mjs --list",
+    "plugins:check": "node scripts/plugins.mjs check",
+    "plugins:publish": "node scripts/plugins.mjs publish"
   },
   "dependencies": {
     "ajv": "^8.20.0"

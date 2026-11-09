@@ -1,0 +1,30 @@
+{
+  "name": "@ylang/pi-btw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ephemeral side questions for Pi without mutating the main session transcript",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylang-ylang/oh-my-plugins.git",
+    "directory": "plugins/btw"
+  },
+  "scripts": {
+    "test": "node --test extension.test.mjs host/index.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pi": {
+    "extensions": [
+      "./extension.ts"
+    ]
+  },
+  "files": [
+    "extension.ts",
+    "host/index.ts",
+    "host/pi.ts",
+    "host/runtime.ts",
+    "host/types.ts"
+  ]
+}

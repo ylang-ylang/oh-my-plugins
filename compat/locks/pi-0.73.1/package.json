@@ -1,0 +1,9 @@
+{
+  "name": "compat-pi-0-73-1",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "0.73.1",
+    "ajv": "8.20.0"
+  }
+}

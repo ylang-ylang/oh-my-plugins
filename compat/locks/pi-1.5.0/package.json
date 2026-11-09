@@ -1,0 +1,9 @@
+{
+  "name": "compat-pi-1-5-0",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "ajv": "8.20.0"
+  }
+}

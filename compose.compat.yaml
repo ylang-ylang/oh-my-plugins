@@ -1,0 +1,20 @@
+services:
+  compat:
+    build:
+      context: .
+      dockerfile: compat/Dockerfile
+      args:
+        NPM_REGISTRY: ${COMPAT_NPM_REGISTRY:-https://registry.npmjs.org}
+      network: ${COMPAT_BUILD_NETWORK:-default}
+    image: oh-my-plugins-compat:node22.22.0-bun1.4.4
+    network_mode: none
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=512m,uid=1000,gid=1000,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 5s
