@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RequestController } from './controller.mjs';
+import { LIMITS } from './protocol.mjs';
 
 const INSTANCE_ID = '11111111-1111-4111-8111-111111111111';
 const OTHER_INSTANCE_ID = '22222222-2222-4222-8222-222222222222';
@@ -108,6 +109,32 @@ const callbackTool = {
   },
 };
 
+test('default requests retain separate two-hour queue and execution windows', async () => {
+  const gate = deferred();
+  const h = harness({ execute: () => gate.promise });
+  h.host.idle = false;
+  await h.controller.submit(h.request('long-work'));
+  h.host.time += 7_200_000 - 1;
+  h.controller.tick();
+  assert.equal(h.controller.get(h.identity('long-work')).state, 'queued');
+  h.host.idle = true;
+  h.controller.tick();
+  await nextTurn();
+  const started = h.controller.get(h.identity('long-work')).startedAt;
+  h.host.time = started + 300_001;
+  h.controller.tick();
+  assert.equal(h.controller.get(h.identity('long-work')).state, 'running');
+  h.host.time = started + 7_200_000 - 1;
+  h.controller.tick();
+  assert.equal(h.controller.get(h.identity('long-work')).state, 'running');
+  h.host.time += 1;
+  h.controller.tick();
+  assert.equal(h.controller.get(h.identity('long-work')).error.code, 'request_timeout');
+  gate.resolve({ messages: [] });
+  await nextTurn();
+  await h.controller.close();
+});
+
 test('concurrent normalized duplicate submissions converge while conflicting reuse and wrong identity fail', async () => {
   const h = harness();
   const [first, duplicate] = await Promise.all([
@@ -116,8 +143,8 @@ test('concurrent normalized duplicate submissions converge while conflicting reu
       responseMode: 'native',
       instructions: '',
       tools: [],
-      queueTimeoutMs: 3_600_000,
-      timeoutMs: 300_000,
+      queueTimeoutMs: LIMITS.queueTimeoutMs,
+      timeoutMs: LIMITS.timeoutMs,
       toolTimeoutMs: 60_000,
     })),
   ]);
@@ -207,12 +234,12 @@ test('explicit host interruption aborts request admission that is still compilin
 test('admission validation time does not consume the accepted request queue budget', async () => {
   const h = harness();
   h.host.idle = false;
-  const pending = h.controller.submit(h.request('admission-clock'));
+  const pending = h.controller.submit(h.request('admission-clock', { queueTimeoutMs: 30_000 }));
   h.host.time = 5000;
   const accepted = await pending;
 
   assert.equal(accepted.createdAt, 5000);
-  assert.equal(accepted.queueDeadlineAt, 3_605_000);
+  assert.equal(accepted.queueDeadlineAt, 35_000);
   assert.equal(accepted.deadlineAt, accepted.queueDeadlineAt);
 });
 
@@ -240,7 +267,7 @@ test('five minutes queued does not spend execution time and dispatch grants the 
   const running = h.controller.get(h.identity('phase-deadlines'));
   assert.equal(running.state, 'running');
   assert.equal(running.startedAt, h.host.time);
-  assert.equal(running.deadlineAt, running.startedAt + 300_000);
+  assert.equal(running.deadlineAt, running.startedAt + LIMITS.timeoutMs);
   assert.equal(running.queueDeadlineAt, accepted.queueDeadlineAt);
   assert.deepEqual(await h.controller.submit(h.request('phase-deadlines')), running);
   await waitFor(() => executions === 1);

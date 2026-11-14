@@ -353,8 +353,8 @@ test('prepareRequest rejects unknown fields and normalizes explicit defaults', a
     instanceId: IDENTITY.instanceId,
     responseMode: 'native',
     tools: [],
-    queueTimeoutMs: 3_600_000,
-    timeoutMs: 300_000,
+    queueTimeoutMs: LIMITS.queueTimeoutMs,
+    timeoutMs: LIMITS.timeoutMs,
     toolTimeoutMs: 60_000,
   })).request;
   assert.equal(canonicalJSON(omitted), canonicalJSON(explicit));

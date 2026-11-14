@@ -239,7 +239,7 @@ Custom OMP/XDG data roots may use a different plugin path. The v2 CLI commands a
 
 Full requests may include optional `instructions`: subordinate user task context injected only into the current request's provider context, not displayed or persisted as system instructions. It defaults to `""`, preserves supplied whitespace, and is bounded to 48 KiB of UTF-8 like `message`; the entire request remains limited to 64 KiB. It participates in request-ID deduplication but is not a public request-record field. Use `submit --request-file` or SDK `submit()`/`run()` to supply it. The visible `message`, assistant replies, and tool history intentionally remain in the selected conversation.
 
-Each accepted request has a bounded queue wait (`queueTimeoutMs`, default 1 hour, maximum 24 hours) and a separate execution budget (`timeoutMs`, default 5 minutes, maximum 1 hour). Execution time starts only when the request becomes `running`; time spent behind another request does not consume it. Queue expiry returns `queue_timeout` without starting the request; expiry after start returns `request_timeout`. CLI `send` may override queue wait with `--queue-timeout SECONDS`; SDK and request-file callers may set `queueTimeoutMs`. This bounded queue is not a durable scheduler for work such as “notify after acceptance”; that follow-up must be scheduled by the business caller.
+Each accepted request has a bounded queue wait (`queueTimeoutMs`, default 2 hours, maximum 24 hours) and a separate execution budget (`timeoutMs`, default 2 hours, maximum 24 hours). Execution time starts only when the request becomes `running`; time spent behind another request does not consume it. Queue expiry returns `queue_timeout` without starting the request; expiry after start returns `request_timeout`. CLI `send` may override queue wait with `--queue-timeout SECONDS`; SDK and request-file callers may set `queueTimeoutMs`. This bounded queue is not a durable scheduler for work such as “notify after acceptance”; that follow-up must be scheduled by the business caller.
 
 `--wait` is deliberately passive: it polls only the request record for up to 300 seconds by default (86,400 maximum), does not stream events, does not execute caller tools, and does not cancel on timeout. It exits 0 for `completed`, 2 for `failed`/`interrupted`/`cancelled`, and 3 on wait timeout, printing the exact recovery query. A request with declared caller tools needs a concurrent worker using `tools`/`claim`/`result`, or the SDK `run()` pump below; waiting for final completion before servicing a tool call can deadlock until timeout.
 
@@ -460,6 +460,7 @@ Version differences must be handled inside `host/adapters/`, not spread into lis
 
 ## Unreleased
 
+- Default queue wait and execution budgets to two hours independently; explicit execution budgets may be up to 24 hours. Network-call and caller-tool timeouts remain separate.
 - Show `queued: N` beside the native radar while RPC requests wait, updating on the existing scheduler tick without interrupting the current task.
 
 - Enable LAN RPC in existing interactive Pi sessions (0.73.1, 0.74.0, 1.5.0), including native/structured replies, caller tools, cancellation fences, inline status and bounded tool retirement. Preserve OMP support; all eight pinned runtime rows pass.
