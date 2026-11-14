@@ -1,6 +1,6 @@
 {
   "name": "@ylang/lanrpc",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "type": "module",
   "description": "LAN RPC for existing interactive OMP and Pi sessions",

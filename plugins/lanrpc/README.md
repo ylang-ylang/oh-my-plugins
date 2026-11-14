@@ -191,6 +191,8 @@ omp
 
 **Fully exit and relaunch OMP after installation or upgrades.** The radar layout is prepared before the native TUI is created. Neither `/reload-plugins` nor `/lanrpc restart` rebuilds an already-created status bar; `/lanrpc restart` restarts only the network listener.
 
+On OMP 18.20.0, a live-process check confirmed that `/reload-plugins` can report success while the old LAN RPC entrypoint and imported modules remain active. Downloading an update and loading it into a running session are separate steps: fully exit OMP, then resume the original session. Do not replay uncertain requests after the new instance/generation starts.
+
 Use `/lanrpc` to open the English control menu, or run subcommands directly:
 
 ```text
@@ -209,6 +211,8 @@ The default listener uses plain HTTP on **127.0.0.1 only**, with an automaticall
 The native status bar shows a small radar rather than an endpoint or token. `/lanrpc info` and menu **Connection details** open a focused panel. HTTPS shows the endpoint, session metadata, certificate path, token file path, and **actual token**. Press **c — Copy token** to send the exact token to the terminal clipboard using OSC 52, including over SSH; your terminal must support and permit clipboard writes (and your multiplexer must allow them). The panel reports that a clipboard request was sent, not that an OS clipboard accepted it. **Esc / Enter** closes the panel and removes the copy hotkey; `c` is never a global chat shortcut. HTTP explicitly shows no authentication and no token. No token is written to logs, status bars, standalone client output, or RPC session metadata. Avoid opening HTTPS details while screen-sharing.
 
 Connection details show the session ID, endpoint, working directory, and busy/queue state. Internal instance UUID and generation are intentionally omitted from this user-facing panel; they remain in the protocol for request identity checks and safe recovery.
+
+While requests wait for this session to become idle, the same inline status slot shows `queued: N` beside the radar. The count updates as requests start, expire or are cancelled; it disappears when the queue is empty. No popup, extra footer or interruption is introduced.
 
 All menus, prompts, confirmations, errors, and help are English. The radar uses the Nerd Fonts `md-radar` glyph and OMP's native theme; local/LAN state is distinguished in the menu. Stopped access shows a small circle; an error shows `!`. If the radar looks like a box, select a supporting [Nerd Font](https://www.nerdfonts.com/) in the terminal displaying OMP. With SSH, this is the local client terminal, not the remote server.
 
@@ -455,6 +459,8 @@ The [collection compatibility matrix](../../README.md#docker-harness-compatibili
 Version differences must be handled inside `host/adapters/`, not spread into listener orchestration, execution policy, or RPC core. Adapter capability reports identify the harness/version and missing features; an unknown failure on a supported path is an error, not a successful unsupported test. New adapters must preserve permissions, cancellation ownership and protocol identity semantics. The async extension factory still awaits native status preparation **before** OMP constructs the TUI. Do not move this work back to `session_start`, persist layout overrides, or introduce a separate endpoint footer.
 
 ## Unreleased
+
+- Show `queued: N` beside the native radar while RPC requests wait, updating on the existing scheduler tick without interrupting the current task.
 
 - Enable LAN RPC in existing interactive Pi sessions (0.73.1, 0.74.0, 1.5.0), including native/structured replies, caller tools, cancellation fences, inline status and bounded tool retirement. Preserve OMP support; all eight pinned runtime rows pass.
 - Anchor native replies by request identity instead of a pre-compaction message index; pre-admission compaction no longer incorrectly interrupts the request or drops its reply.

@@ -120,12 +120,13 @@ export default async function lanRpc(pi) {
       });
       controller = current;
       server = await startServer({ controller: current, operations, onError: error => report(ctx, error) });
+      const listeningMode = mode();
       timerContext = ctx;
       timer = ctx.setInterval(() => {
         if (!changing) current.tick();
-        if (current.closed) indicator.set(ctx, 'error');
+        indicator.set(ctx, current.closed ? 'error' : listeningMode, current.queue.length);
       }, 100);
-      indicator.set(ctx, mode());
+      indicator.set(ctx, listeningMode, current.queue.length);
       log('host.listener.ready', ctx, {
         instanceId: current.instanceId,
         generation: current.generation,
@@ -177,7 +178,7 @@ export default async function lanRpc(pi) {
       if (controller && !controller.closed &&
           controller.sessionId === ctx.sessionManager.getSessionId() && controller.cwd === ctx.cwd) {
         await indicator.activate(ctx);
-        indicator.set(ctx, mode());
+        indicator.set(ctx, mode(), controller.queue.length);
         log('host.listener.preserved', ctx, { state: 'listening', reason: trigger });
         return;
       }

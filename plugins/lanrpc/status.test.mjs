@@ -140,6 +140,40 @@ for (const generation of ['legacy', 'modern']) {
   });
 }
 
+test('queued requests remain visible as the count changes and clear when waiting ends', async () => {
+  for (const generation of ['legacy', 'modern']) {
+    const { indicator, ctx, nativeStatus } = await createSurface(generation);
+    await indicator.activate(ctx);
+    indicator.set(ctx, 'local', 1);
+    assert.equal(nativeStatus.get(STATUS_KEY), `${RADAR} queued: 1`);
+    indicator.set(ctx, 'local', 2);
+    assert.equal(nativeStatus.get(STATUS_KEY), `${RADAR} queued: 2`);
+    indicator.set(ctx, 'local', 0);
+    assert.equal(nativeStatus.get(STATUS_KEY), RADAR);
+    indicator.set(ctx, 'error', 2);
+    assert.equal(nativeStatus.get(STATUS_KEY), '!');
+    indicator.dispose(ctx);
+    assert.equal(nativeStatus.has(STATUS_KEY), false);
+  }
+});
+
+test('Pi queue status refreshes without adding widgets or loading native settings', async () => {
+  let visible;
+  const ctx = { hasUI: true };
+  const indicator = new StatusIndicator({
+    statusMode: 'extension',
+    hasUI: current => current.hasUI,
+    setStatus: (_ctx, _key, value) => { visible = value; },
+  });
+  await indicator.activate(ctx);
+  indicator.set(ctx, 'local', 3);
+  assert.equal(visible, `${RADAR} queued: 3`);
+  indicator.set(ctx, 'local', 0);
+  assert.equal(visible, RADAR);
+  indicator.dispose(ctx);
+  assert.equal(visible, undefined);
+});
+
 test('extension status mode uses the host inline status slot without native layout settings', async () => {
   const updates = [];
   const ctx = { hasUI: true };

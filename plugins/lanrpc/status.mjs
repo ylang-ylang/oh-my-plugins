@@ -15,6 +15,7 @@ export class StatusIndicator {
     this.active = false;
     this.lastMode = undefined;
     this.owned = new Map();
+    this.lastQueueDepth = undefined;
   }
 
   async prepareAtLoad() {
@@ -31,6 +32,7 @@ export class StatusIndicator {
     if (this.mode === 'extension') {
       this.active = true;
       this.lastMode = undefined;
+      this.lastQueueDepth = undefined;
       return;
     }
     this.settings ??= await this.host.loadSettings();
@@ -73,16 +75,19 @@ export class StatusIndicator {
       }
       this.active = true;
       this.lastMode = undefined;
+      this.lastQueueDepth = undefined;
     } catch (error) {
       this.restore();
       throw error;
     }
   }
 
-  set(ctx, mode) {
-    if (!this.active || mode === this.lastMode) return;
+  set(ctx, mode, queued = 0) {
+    const queueDepth = mode === 'local' || mode === 'lan' ? queued : 0;
+    if (!this.active || (mode === this.lastMode && queueDepth === this.lastQueueDepth)) return;
     this.lastMode = mode;
-    this.host.setStatus(ctx, STATUS_KEY, ICONS[mode]);
+    this.lastQueueDepth = queueDepth;
+    this.host.setStatus(ctx, STATUS_KEY, queueDepth > 0 ? `${ICONS[mode]} queued: ${queueDepth}` : ICONS[mode]);
   }
 
   restore() {
@@ -102,5 +107,6 @@ export class StatusIndicator {
     this.restore();
     this.active = false;
     this.lastMode = undefined;
+    this.lastQueueDepth = undefined;
   }
 }
