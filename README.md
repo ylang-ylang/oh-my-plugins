@@ -6,7 +6,7 @@ A collection of independently installable OMP/Pi plugins: [ylang-ylang/oh-my-plu
 | --- | --- | --- | --- |
 | [LAN RPC](plugins/lanrpc/README.md) | `@ylang/lanrpc` | OMP and Pi | HTTP/SSH access to the current interactive session |
 | [BTW](#btw) | `@ylang/pi-btw` | Pi | Side questions without changing the main transcript |
-| [Hindsight](#hindsight) | `@ylang/hindsight` | Pi 1.5.0 | Opt-in scoped memory tools and first-prompt recall |
+| [Hindsight](#hindsight) | `@ylang/hindsight` | Pi 0.80.6, 1.5.0–1.5.2 | Opt-in scoped memory tools and first-prompt recall |
 
 OMP already includes native BTW; the collection does not register another BTW command there.
 
@@ -92,7 +92,7 @@ pi install /absolute/path/to/oh-my-plugins/plugins/lanrpc
 # BTW only (Pi):
 pi install /absolute/path/to/oh-my-plugins/plugins/btw
 
-# Hindsight only (Pi 1.5.0):
+# Hindsight only (Pi 0.80.6 or 1.5.0–1.5.2):
 pi install /absolute/path/to/oh-my-plugins/plugins/hindsight
 ```
 
@@ -149,7 +149,7 @@ Do not retain an old auto-discovered `~/.pi/agent/extensions/btw.ts` alongside t
 
 ## Hindsight
 
-The independent `@ylang/hindsight` package owns its memory behavior, credentials, HTTP client and guidance. It targets Pi 1.5.0's native structured `before_agent_start` API; older Pi releases and OMP are not advertised. OMP already provides native Hindsight support and should use that instead.
+The independent `@ylang/hindsight` package owns its memory behavior, credentials, HTTP client and guidance. It supports the native APIs of `@earendil-works/pi-coding-agent` 0.80.6 and 1.5.0–1.5.2. Both use the same positional tool execution signature and accept JSON Schema parameters. Memory guidance uses their common returned `systemPrompt` API: 0.80.6 has no mutable prompt sections or `messageType`, while 1.5 distinguishes user and custom-message runs. Custom-message runs never trigger automatic recall. OMP already provides native Hindsight support and should use that instead.
 
 Configure the base URL in `~/.pi/agent/hindsight.json`:
 
@@ -177,6 +177,9 @@ npm test
 npm run test:lanrpc
 npm run test:btw
 npm run test:hindsight
+# Native consumer regressions, once per separately installed supported Pi version:
+PI_NATIVE_ROOT=/absolute/path/to/node_modules/@earendil-works/pi-coding-agent \
+  npm run test:native --workspace @ylang/hindsight
 npm run plugins:check              # Check real, independently packed plugin tarballs
 npm pack --dry-run                 # Inspect the optional complete collection
 ```

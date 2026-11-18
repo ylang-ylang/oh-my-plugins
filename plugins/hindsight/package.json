@@ -1,6 +1,6 @@
 {
   "name": "@ylang/hindsight",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Opt-in scoped Hindsight memory tools and first-prompt recall for Pi",
   "type": "module",
@@ -10,7 +10,8 @@
     "directory": "plugins/hindsight"
   },
   "scripts": {
-    "test": "node --test client.test.mjs extension.test.mjs"
+    "test": "node --test client.test.mjs extension.test.mjs",
+    "test:native": "node --test native.test.mjs"
   },
   "engines": {
     "node": ">=22"
