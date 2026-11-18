@@ -6,7 +6,7 @@ A collection of independently installable OMP/Pi plugins: [ylang-ylang/oh-my-plu
 | --- | --- | --- | --- |
 | [LAN RPC](plugins/lanrpc/README.md) | `@ylang/lanrpc` | OMP and Pi | HTTP/SSH access to the current interactive session |
 | [BTW](#btw) | `@ylang/pi-btw` | Pi | Side questions without changing the main transcript |
-| [Hindsight](#hindsight) | `@ylang/hindsight` | Pi 0.80.6, 1.5.0–1.5.2 | Opt-in scoped memory tools and first-prompt recall |
+| [Hindsight](#hindsight) | `@ylang/hindsight` | Pi 1.5.2 | Opt-in scoped memory tools and first-prompt recall |
 
 OMP already includes native BTW; the collection does not register another BTW command there.
 
@@ -92,7 +92,7 @@ pi install /absolute/path/to/oh-my-plugins/plugins/lanrpc
 # BTW only (Pi):
 pi install /absolute/path/to/oh-my-plugins/plugins/btw
 
-# Hindsight only (Pi 0.80.6 or 1.5.0–1.5.2):
+# Hindsight only (Pi 1.5.2):
 pi install /absolute/path/to/oh-my-plugins/plugins/hindsight
 ```
 
@@ -149,7 +149,7 @@ Do not retain an old auto-discovered `~/.pi/agent/extensions/btw.ts` alongside t
 
 ## Hindsight
 
-The independent `@ylang/hindsight` package owns its memory behavior, credentials, HTTP client and guidance. It supports the native APIs of `@earendil-works/pi-coding-agent` 0.80.6 and 1.5.0–1.5.2. Both use the same positional tool execution signature and accept JSON Schema parameters. Memory guidance uses their common returned `systemPrompt` API: 0.80.6 has no mutable prompt sections or `messageType`, while 1.5 distinguishes user and custom-message runs. Custom-message runs never trigger automatic recall. OMP already provides native Hindsight support and should use that instead.
+The independent `@ylang/hindsight` package owns its memory behavior, credentials, HTTP client and guidance. It targets the current native API of `@earendil-works/pi-coding-agent` 1.5.2, with JSON Schema parameters and positional tool execution. Memory guidance uses the returned `systemPrompt` API and preserves existing user and extension guidance. Only runs explicitly marked `messageType: "user"` trigger automatic recall; custom-message runs do not. OMP already provides native Hindsight support and should use that instead.
 
 Configure the base URL in `~/.pi/agent/hindsight.json`:
 
@@ -177,7 +177,7 @@ npm test
 npm run test:lanrpc
 npm run test:btw
 npm run test:hindsight
-# Native consumer regressions, once per separately installed supported Pi version:
+# Native consumer regressions against the installed current Pi:
 PI_NATIVE_ROOT=/absolute/path/to/node_modules/@earendil-works/pi-coding-agent \
   npm run test:native --workspace @ylang/hindsight
 npm run plugins:check              # Check real, independently packed plugin tarballs
@@ -256,7 +256,7 @@ Each container runs the real installed harness. A deterministic local provider d
 
 Pi rows also load the real packaged BTW entry and exercise streamed side questions, follow-up/history, cancellation, private sidecar history and preservation of the main conversation. The BTW isolation baseline is taken after the preceding LAN RPC request has completed. OMP keeps its native BTW command; the external Pi plugin is not installed there.
 
-Hindsight is not part of the collection's implicit Pi loadout or the older-host LAN RPC/BTW matrix. Its standalone manifest targets Pi 1.5.0; verify it with the real Pi package loader and native tool runner before publishing. Missing-credential tool errors must remain visible without notifications, and no private Hindsight service or credentials belong in compatibility containers.
+Hindsight is not part of the collection's implicit Pi loadout or the older-host LAN RPC/BTW matrix. Its standalone manifest targets Pi 1.5.2; verify it with the real Pi package loader and native tool runner before publishing. Missing-credential tool errors must remain visible without notifications, and no private Hindsight service or credentials belong in compatibility containers.
 
 When a harness interface changes, add a pinned row on each relevant side of the boundary and update the centralized adapter. Keep old rows until support is explicitly retired; never relax an assertion merely to make a new version green. New plugins must declare which harnesses/features they support and reuse the compatibility environment rather than assume namespace or version compatibility. Runtime images and package versions must remain pinned; do not replace them with `latest`. Reports are local artifacts under `.compat-results/`, not a promise that untested versions work.
 

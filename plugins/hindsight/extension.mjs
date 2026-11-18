@@ -84,11 +84,9 @@ export default function hindsight(pi) {
   });
 
   pi.on('before_agent_start', async (event, ctx) => {
-    // Both supported Pi APIs chain returned systemPrompt overrides. Pi 0.80.6
-    // has no mutable sections or messageType; its prompt event is always user input.
     const result = { systemPrompt: `${event.systemPrompt}\n\n${MEMORY_GUIDANCE}` };
     if (/^(1|true|yes)$/i.test(process.env.PI_OFFLINE || '')) return result;
-    if (recalled || (event.messageType !== undefined && event.messageType !== 'user') || !event.prompt?.trim()) return result;
+    if (recalled || event.messageType !== 'user' || !event.prompt?.trim()) return result;
     recalled = true;
     try {
       const memory = memoryFor(ctx);

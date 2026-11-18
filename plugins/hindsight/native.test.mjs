@@ -12,8 +12,6 @@ if (!process.env.PI_NATIVE_ROOT) throw new Error('Set PI_NATIVE_ROOT to an insta
 const nativeRoot = path.resolve(process.env.PI_NATIVE_ROOT);
 const manifest = JSON.parse(readFileSync(path.join(nativeRoot, 'package.json'), 'utf8'));
 assert.equal(manifest.name, '@earendil-works/pi-coding-agent');
-assert.ok(['0.80.6', '1.5.0', '1.5.2'].includes(manifest.version), `Unsupported native consumer test version: ${manifest.version}`);
-const classic = manifest.version === '0.80.6';
 const sdk = await import(pathToFileURL(path.join(nativeRoot, 'dist/index.js')));
 const { buildSystemPrompt } = await import(pathToFileURL(path.join(nativeRoot, 'dist/core/system-prompt.js')));
 const aiResolution = spawnSync(process.execPath, [
@@ -56,9 +54,7 @@ async function setup(t) {
   const tools = new Map(sdk.wrapRegisteredTools(runner.getAllRegisteredTools(), runner).map(tool => [tool.name, tool]));
   async function before(prompt) {
     const options = { cwd: home, customPrompt: 'Existing user and extension guidance' };
-    return classic
-      ? runner.emitBeforeAgentStart(prompt, undefined, buildSystemPrompt(options), options)
-      : runner.emitBeforeAgentStart({ messageType: 'user', prompt }, options);
+    return runner.emitBeforeAgentStart({ messageType: 'user', prompt }, options);
   }
   function validate(name, args) {
     return validateToolArguments(tools.get(name), { type: 'toolCall', id: 'native-validation', name, arguments: args });
@@ -71,16 +67,14 @@ async function setup(t) {
 
 test(`Pi ${manifest.version}: real event pipeline recalls only the first nonempty user prompt`, async t => {
   const { home, runner, errors, requests, before } = await setup(t);
-  if (!classic) {
-    const custom = await runner.emitBeforeAgentStart({
-      messageType: 'custom', message: { customType: 'background', content: 'not user input', display: false },
-    }, { cwd: home, customPrompt: 'Existing user and extension guidance' });
-    assert.equal(custom.messages.length, 0);
-  }
+  const custom = await runner.emitBeforeAgentStart({
+    messageType: 'custom', message: { customType: 'background', content: 'not user input', display: false },
+  }, { cwd: home, customPrompt: 'Existing user and extension guidance' });
+  assert.equal(custom.messages.length, 0);
   await before(' ');
   assert.equal(requests.length, 0);
   const first = await before('q'.repeat(1000));
-  const effectivePrompt = classic ? first.systemPrompt : buildSystemPrompt(first.systemPromptOptions);
+  const effectivePrompt = buildSystemPrompt(first.systemPromptOptions);
   assert.ok(effectivePrompt.startsWith('Existing user and extension guidance'));
   assert.ok(effectivePrompt.includes(MEMORY_GUIDANCE));
   assert.equal(first.messages.length, 1);
@@ -123,16 +117,9 @@ test(`Pi ${manifest.version}: native coercion preserves caller arguments and sco
   const query = { query: 42 };
   assert.deepEqual(validate('recall', query), { query: '42' });
   assert.deepEqual(query, { query: 42 });
-  // Pi 0.80's plain-schema fallback maps null to an empty string; Pi 1.5's
-  // native pi-schema converter maps required string nulls to the word "null".
-  // Exercise the real validators rather than asserting fake cross-version parity.
-  if (classic) {
-    assert.throws(() => validate('recall', { query: null }), /Validation failed/);
-    assert.throws(() => validate('retain', { items: [{ content: null }] }), /Validation failed/);
-  } else {
-    assert.deepEqual(validate('recall', { query: null }), { query: 'null' });
-    assert.deepEqual(validate('retain', { items: [{ content: null }] }), { items: [{ content: 'null' }] });
-  }
+  // The native validator coerces required string nulls to the word "null".
+  assert.deepEqual(validate('recall', { query: null }), { query: 'null' });
+  assert.deepEqual(validate('retain', { items: [{ content: null }] }), { items: [{ content: 'null' }] });
   await assert.rejects(execute('recall', { query: ' ' }), /Recall query must be nonempty/);
   await assert.rejects(execute('retain', { items: [{ content: ' ' }] }), /Memory content must be nonempty/);
   assert.equal(requests.length, 0);

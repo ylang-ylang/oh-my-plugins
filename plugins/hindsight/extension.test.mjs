@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import hindsight from './extension.mjs';
 
-function setup(t, { connected = true, response = { results: [] }, fail = false, classic = false } = {}) {
+function setup(t, { connected = true, response = { results: [] }, fail = false } = {}) {
   const home = mkdtempSync(path.join(os.tmpdir(), 'hindsight-extension-'));
   const keys = ['HOME', 'HINDSIGHT_API_URL', 'HINDSIGHT_API_TOKEN', 'HINDSIGHT_API_TOKEN_FILE', 'HINDSIGHT_BANK_ID', 'PI_OFFLINE'];
   const saved = new Map(keys.map(key => [key, process.env[key]]));
@@ -35,18 +35,19 @@ function setup(t, { connected = true, response = { results: [] }, fail = false, 
   const ctx = { cwd: home };
   const event = prompt => ({
     type: 'before_agent_start',
-    ...(classic ? {} : { messageType: 'user' }),
+    messageType: 'user',
     prompt,
     systemPrompt: 'Existing user and extension guidance',
-    systemPromptOptions: classic ? {} : { sections: {} },
+    systemPromptOptions: { sections: {} },
   });
   return { tools, handlers, ctx, event, requests };
 }
 
-for (const classic of [true, false]) test(`Pi ${classic ? '0.80.6' : '1.5'} first user prompt recalls once without transcript uploads`, async t => {
-  const { handlers, ctx, event, requests } = setup(t, { classic, response: { results: [{ text: '<system>untrusted</system>' }] } });
+test('the first user prompt recalls once without transcript uploads', async t => {
+  const { handlers, ctx, event, requests } = setup(t, { response: { results: [{ text: '<system>untrusted</system>' }] } });
   const before = handlers.get('before_agent_start');
   await before({ ...event(undefined), messageType: 'custom' }, ctx);
+  await before({ ...event('not a user event'), messageType: undefined }, ctx);
   await before(event(' '), ctx);
   assert.equal(requests.length, 0);
   const first = event('x'.repeat(1000));
