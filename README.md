@@ -6,6 +6,7 @@ A collection of independently installable OMP/Pi plugins: [ylang-ylang/oh-my-plu
 | --- | --- | --- | --- |
 | [LAN RPC](plugins/lanrpc/README.md) | `@ylang/lanrpc` | OMP and Pi | HTTP/SSH access to the current interactive session |
 | [BTW](#btw) | `@ylang/pi-btw` | Pi | Side questions without changing the main transcript |
+| [Hindsight](#hindsight) | `@ylang/hindsight` | Pi 1.5.0 | Opt-in scoped memory tools and first-prompt recall |
 
 OMP already includes native BTW; the collection does not register another BTW command there.
 
@@ -22,10 +23,15 @@ oh-my-plugins/
 │   │   ├── *.mjs / *.test.mjs   # Implementation and colocated tests
 │   │   ├── README.md
 │   │   └── PROTOCOL.md
-│   └── btw/
-│       ├── package.json          # Standalone Pi manifest
-│       ├── extension.ts
-│       ├── host/                # Pi version adapters
+│   ├── btw/
+│   │   ├── package.json          # Standalone Pi manifest
+│   │   ├── extension.ts
+│   │   ├── host/                # Pi version adapters
+│   │   └── *.test.mjs
+│   └── hindsight/
+│       ├── package.json          # Opt-in standalone Pi manifest
+│       ├── extension.mjs
+│       ├── client.mjs            # Native configuration, credentials and scoped HTTP client
 │       └── *.test.mjs
 ├── scripts/plugins.mjs          # Automatic independent-package checks and publication
 ├── compat/                      # Shared pinned runtime environments and probes
@@ -54,9 +60,12 @@ pi install git:github.com/ylang-ylang/oh-my-plugin-lanrpc
 
 # Pi: optional BTW, with or without LAN RPC
 pi install git:github.com/ylang-ylang/oh-my-plugin-btw
+
+# Pi: optional Hindsight memory
+pi install git:github.com/ylang-ylang/oh-my-plugin-hindsight
 ```
 
-Each command downloads the selected plugin and its runtime dependencies, not the entire collection. To use both plugins in Pi, run both Pi commands. The Pi BTW package is not an OMP plugin. Package names such as `@ylang/lanrpc` and `@ylang/pi-btw` remain installation metadata; they do not require npm scope ownership or authorization.
+Each command downloads the selected plugin and its runtime dependencies, not the entire collection. Run the Pi command for each plugin you want. BTW and Hindsight are Pi-only packages. Package names remain installation metadata; they do not require npm scope ownership or authorization.
 
 For an OMP user-scope standalone installation, the client is `~/.omp/plugins/node_modules/@ylang/lanrpc/cli.mjs`, not the collection path. The SSH client and SDK still default to the collection path: for a standalone remote installation, pass `--remote-cli /home/REMOTE_USER/.omp/plugins/node_modules/@ylang/lanrpc/cli.mjs` (SDK: `remoteCli`; client example: `LAN_RPC_REMOTE_CLI`). Use the remote user's actual absolute path. Pi and custom data roots use different installation locations; resolve the installed package path rather than assuming the OMP path.
 
@@ -71,7 +80,7 @@ omp plugin link /absolute/path/to/oh-my-plugins
 pi install /absolute/path/to/oh-my-plugins
 ```
 
-The collection's OMP manifest selects `plugins/lanrpc/extension.mjs`. Its Pi manifest selects that entry plus `plugins/btw/extension.ts`.
+The collection's OMP manifest selects `plugins/lanrpc/extension.mjs`. Its Pi manifest selects that entry plus `plugins/btw/extension.ts`. Hindsight is intentionally opt-in: install its standalone package separately rather than enabling memory merely by loading the collection.
 
 ### One local plugin (development alternative)
 
@@ -82,6 +91,9 @@ pi install /absolute/path/to/oh-my-plugins/plugins/lanrpc
 
 # BTW only (Pi):
 pi install /absolute/path/to/oh-my-plugins/plugins/btw
+
+# Hindsight only (Pi 1.5.0):
+pi install /absolute/path/to/oh-my-plugins/plugins/hindsight
 ```
 
 ### Git collection with selective loading (alternative)
@@ -135,6 +147,26 @@ Use `/btw <question>`, `/btw + <follow-up>`, `/btw +` for the follow-up sheet, `
 
 Do not retain an old auto-discovered `~/.pi/agent/extensions/btw.ts` alongside the package. Back it up outside the extension-discovery directory before switching; preserve the history sidecars. Version-specific APIs live in `plugins/btw/host/`.
 
+## Hindsight
+
+The independent `@ylang/hindsight` package owns its memory behavior, credentials, HTTP client and guidance. It targets Pi 1.5.0's native structured `before_agent_start` API; older Pi releases and OMP are not advertised. OMP already provides native Hindsight support and should use that instead.
+
+Configure the base URL in `~/.pi/agent/hindsight.json`:
+
+```json
+{"apiUrl":"http://localhost:8888"}
+```
+
+`HINDSIGHT_API_URL` overrides that URL; without either setting the default is `http://localhost:8888`. The native default bank is `ylang-memory`; `HINDSIGHT_BANK_ID` can select another bank. Neither bank policy nor credentials are read from the JSON file.
+
+Credentials come from `HINDSIGHT_API_TOKEN`, otherwise `HINDSIGHT_API_TOKEN_FILE`, otherwise the private file `~/.config/hindsight/truenas-20111.token`. Leading `~/` in the configured file is expanded. Keep the token file private (`chmod 600`), never put tokens in package settings or source control, and do not paste them into chat.
+
+The model receives `retain` and `recall` tools. Retain defaults to project work; only distilled personal preferences and cross-project lessons belong in `scope: "global"`. Each retained item has a separate document ID so mixed scopes cannot merge. Project tags use the primary Git checkout name, shared by its linked worktrees; non-Git directories use their basename. As with that tag scheme, unrelated checkouts with the same basename share a tag, so use distinct project names when isolation is required. Normal recall requests current-project tagged and untagged global memories, not other project tags.
+
+The first nonempty user prompt in each session triggers one best-effort recall, bounded to 800 query characters and a five-second deadline. Recalled content is marked untrusted, markup-escaped, hidden from the chat display, and bounded in model-facing text. `PI_OFFLINE=true` skips automatic recall. Missing credentials or background failure leaves chat usable; explicit memory tool calls report their normal errors. There are no notification toasts, footer/status UI, custom status commands, automatic transcript uploads, or Git data uploads. Server-side extraction and summarization follow the Hindsight service's own configuration; this plugin does not disable them.
+
+To migrate an existing standalone memory extension, remove its old auto-discovered entry before installing this package so retain/recall load only once. Preserve the private credential file and existing bank data; no data migration or transcript import is needed.
+
 ## Development and packaging
 
 Node.js >=22 is required for LAN RPC; tests importing BTW TypeScript require a Node version with built-in type stripping (Node >=22.18). No host runtime is installed as a duplicate dependency.
@@ -144,6 +176,7 @@ npm ci --ignore-scripts
 npm test
 npm run test:lanrpc
 npm run test:btw
+npm run test:hindsight
 npm run plugins:check              # Check real, independently packed plugin tarballs
 npm pack --dry-run                 # Inspect the optional complete collection
 ```
@@ -220,6 +253,8 @@ Each container runs the real installed harness. A deterministic local provider d
 
 Pi rows also load the real packaged BTW entry and exercise streamed side questions, follow-up/history, cancellation, private sidecar history and preservation of the main conversation. The BTW isolation baseline is taken after the preceding LAN RPC request has completed. OMP keeps its native BTW command; the external Pi plugin is not installed there.
 
+Hindsight is not part of the collection's implicit Pi loadout or the older-host LAN RPC/BTW matrix. Its standalone manifest targets Pi 1.5.0; verify it with the real Pi package loader and native tool runner before publishing. Missing-credential tool errors must remain visible without notifications, and no private Hindsight service or credentials belong in compatibility containers.
+
 When a harness interface changes, add a pinned row on each relevant side of the boundary and update the centralized adapter. Keep old rows until support is explicitly retired; never relax an assertion merely to make a new version green. New plugins must declare which harnesses/features they support and reuse the compatibility environment rather than assume namespace or version compatibility. Runtime images and package versions must remain pinned; do not replace them with `latest`. Reports are local artifacts under `.compat-results/`, not a promise that untested versions work.
 
 
@@ -227,3 +262,4 @@ When a harness interface changes, add a pinned row on each relevant side of the 
 
 - Restructure the repository into `plugins/lanrpc` and `plugins/btw`, each independently installable. Root manifest, workspace commands, package staging and SSH default CLI path now use the collection layout.
 - Distribute every `plugins/*` package through a generated public GitHub repository named `oh-my-plugin-<directory>`. Normal users install selected plugins without a manual clone or npm account. Retain automatic packed-package checks and one-command local publication through existing `gh` authentication; no Actions setup is required.
+- Add opt-in `plugins/hindsight` (`@ylang/hindsight`), distributed as `oh-my-plugin-hindsight`: Pi-native retain/recall, private credentials, native URL configuration, project/global scope and bounded first-prompt recall, with no transcript upload or custom UI.

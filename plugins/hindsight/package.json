@@ -1,0 +1,27 @@
+{
+  "name": "@ylang/hindsight",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opt-in scoped Hindsight memory tools and first-prompt recall for Pi",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylang-ylang/oh-my-plugins.git",
+    "directory": "plugins/hindsight"
+  },
+  "scripts": {
+    "test": "node --test client.test.mjs extension.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pi": {
+    "extensions": [
+      "./extension.mjs"
+    ]
+  },
+  "files": [
+    "extension.mjs",
+    "client.mjs"
+  ]
+}
