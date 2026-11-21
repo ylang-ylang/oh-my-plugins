@@ -151,13 +151,13 @@ Do not retain an old auto-discovered `~/.pi/agent/extensions/btw.ts` alongside t
 
 The independent `@ylang/hindsight` package owns its memory behavior, credentials, HTTP client and guidance. It targets the current native API of `@earendil-works/pi-coding-agent` 1.5.2, with JSON Schema parameters and positional tool execution. Memory guidance uses the returned `systemPrompt` API and preserves existing user and extension guidance. Only runs explicitly marked `messageType: "user"` trigger automatic recall; custom-message runs do not. OMP already provides native Hindsight support and should use that instead.
 
-Configure the base URL in `~/.pi/agent/hindsight.json`:
+Configure the connection in `~/.pi/agent/hindsight.json`:
 
 ```json
-{"apiUrl":"http://localhost:8888"}
+{"apiUrl":"http://localhost:8888","bankId":"ylangsCodingAgents"}
 ```
 
-`HINDSIGHT_API_URL` overrides that URL; without either setting the default is `http://localhost:8888`. The native default bank is `ylang-memory`; `HINDSIGHT_BANK_ID` can select another bank. Neither bank policy nor credentials are read from the JSON file.
+`HINDSIGHT_API_URL` overrides that URL; without either setting the default is `http://localhost:8888`. `HINDSIGHT_BANK_ID` overrides `bankId` in the JSON file; without either setting the default bank is `ylangsCodingAgents`. Credentials and scope policy are not read from this JSON file. After updating, restart existing sessions so they discard any client cached with the previous bank ID.
 
 Credentials come from `HINDSIGHT_API_TOKEN`, otherwise `HINDSIGHT_API_TOKEN_FILE`, otherwise the private file `~/.config/hindsight/truenas-20111.token`. Leading `~/` in the configured file is expanded. Keep the token file private (`chmod 600`), never put tokens in package settings or source control, and do not paste them into chat.
 

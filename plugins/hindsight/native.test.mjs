@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -132,5 +132,25 @@ test(`Pi ${manifest.version}: native coercion preserves caller arguments and sco
   assert.deepEqual(retained.body.items[1].tags, []);
   assert.notEqual(retained.body.items[0].document_id, retained.body.items[1].document_id);
   assert.equal(retained.body.async, false);
+  assert.deepEqual(errors, []);
+});
+
+test(`Pi ${manifest.version}: default, native config and environment select the actual request bank`, async t => {
+  const { home, runner, requests, before, errors } = await setup(t);
+  delete process.env.HINDSIGHT_BANK_ID;
+  await before('plugin default');
+  assert.equal(requests[0].url, 'http://hindsight.test/v1/default/banks/ylangsCodingAgents');
+  assert.equal(requests[1].url, 'http://hindsight.test/v1/default/banks/ylangsCodingAgents/memories/recall');
+  mkdirSync(path.join(home, '.pi/agent'), { recursive: true });
+  writeFileSync(path.join(home, '.pi/agent/hindsight.json'), JSON.stringify({ bankId: 'configured-native-bank' }));
+  await runner.emit({ type: 'session_start', reason: 'new' });
+  await before('native config');
+  assert.equal(requests[2].url, 'http://hindsight.test/v1/default/banks/configured-native-bank');
+  assert.equal(requests[3].url, 'http://hindsight.test/v1/default/banks/configured-native-bank/memories/recall');
+  process.env.HINDSIGHT_BANK_ID = 'explicit-environment-bank';
+  await runner.emit({ type: 'session_start', reason: 'new' });
+  await before('environment override');
+  assert.equal(requests[4].url, 'http://hindsight.test/v1/default/banks/explicit-environment-bank');
+  assert.equal(requests[5].url, 'http://hindsight.test/v1/default/banks/explicit-environment-bank/memories/recall');
   assert.deepEqual(errors, []);
 });

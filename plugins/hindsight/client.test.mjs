@@ -33,13 +33,14 @@ function recordingClient(t, options = {}) {
   return { client, calls };
 }
 
-test('native URL config, environment precedence and plugin-owned bank default', t => {
+test('native connection config, environment precedence and plugin-owned bank default', t => {
   const home = homeFor(t);
   assert.equal(readHindsightConfig({ home, env: {} }).apiUrl, 'http://localhost:8888');
-  nativeConfig(home, { apiUrl: 'http://127.0.0.1:9999///', bankId: 'not-native-policy', apiToken: 'not-a-supported-config-key' });
+  assert.equal(readHindsightConfig({ home, env: {} }).bankId, 'ylangsCodingAgents');
+  nativeConfig(home, { apiUrl: 'http://127.0.0.1:9999///', bankId: 'configured-bank', apiToken: 'not-a-supported-config-key' });
   const config = readHindsightConfig({ home, env: {} });
   assert.equal(config.apiUrl, 'http://127.0.0.1:9999');
-  assert.equal(config.bankId, 'ylang-memory');
+  assert.equal(config.bankId, 'configured-bank');
   assert.equal(config.apiToken, null);
   const overridden = readHindsightConfig({ home, env: {
     HINDSIGHT_API_URL: 'http://127.0.0.1:7777/', HINDSIGHT_BANK_ID: 'isolated-bank', HINDSIGHT_API_TOKEN: ` ${testToken} \n`,
@@ -47,6 +48,18 @@ test('native URL config, environment precedence and plugin-owned bank default', 
   assert.equal(overridden.apiUrl, 'http://127.0.0.1:7777');
   assert.equal(overridden.bankId, 'isolated-bank');
   assert.equal(overridden.apiToken, testToken);
+});
+
+test('configured bank reaches the wire without an environment override', async t => {
+  const home = homeFor(t);
+  nativeConfig(home, { bankId: 'ylangsCodingAgents' });
+  const { client, calls } = recordingClient(t, { home });
+  await client.recall('stored coding decision');
+  assert.equal(client.bankId, 'ylangsCodingAgents');
+  assert.deepEqual(calls.map(call => new URL(call.url).pathname), [
+    '/v1/default/banks/ylangsCodingAgents',
+    '/v1/default/banks/ylangsCodingAgents/memories/recall',
+  ]);
 });
 
 test('credentials use the private default file or explicit native token file', t => {

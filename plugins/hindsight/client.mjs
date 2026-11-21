@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 
 export const HINDSIGHT_DEFAULTS = Object.freeze({
   apiUrl: 'http://localhost:8888',
-  bankId: 'ylang-memory',
+  bankId: 'ylangsCodingAgents',
 });
 
 export const MEMORY_GUIDANCE = `Central memory uses one Hindsight bank with two logical areas, not filesystem folders.
@@ -23,7 +23,7 @@ export function readHindsightConfig({ home = os.homedir(), env = process.env } =
     if (error.code !== 'ENOENT') throw error;
   }
   const apiUrl = (env.HINDSIGHT_API_URL || nativeConfig.apiUrl || HINDSIGHT_DEFAULTS.apiUrl).replace(/\/+$/, '');
-  const bankId = env.HINDSIGHT_BANK_ID || HINDSIGHT_DEFAULTS.bankId;
+  const bankId = env.HINDSIGHT_BANK_ID || nativeConfig.bankId || HINDSIGHT_DEFAULTS.bankId;
   const environmentToken = env.HINDSIGHT_API_TOKEN?.trim();
   if (environmentToken) return { apiUrl, bankId, apiToken: environmentToken, credentialSource: 'HINDSIGHT_API_TOKEN' };
   const configuredFile = env.HINDSIGHT_API_TOKEN_FILE;
