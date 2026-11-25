@@ -3,7 +3,7 @@
   "version": "0.5.5",
   "private": true,
   "type": "module",
-  "description": "Independent OMP and Pi plugins: LAN RPC, BTW and Hindsight",
+  "description": "Independent OMP and Pi plugins: LAN RPC and BTW",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ylang-ylang/oh-my-plugins.git"
@@ -38,7 +38,6 @@
     "test": "npm run test --workspaces",
     "test:lanrpc": "npm run test --workspace @ylang/lanrpc",
     "test:btw": "npm run test --workspace @ylang/pi-btw",
-    "test:hindsight": "npm run test --workspace @ylang/hindsight",
     "test:compat": "node compat/docker.mjs --all",
     "compat:list": "node compat/docker.mjs --list",
     "plugins:check": "node scripts/plugins.mjs check",
